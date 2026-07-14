@@ -39,7 +39,7 @@ Sorting, badges, downloads, and reel controls are part of AI Flywheel Pro.
 
 - Buy a plan from the extension popup: monthly, yearly, or lifetime.
 - Enter the license key you receive by email to activate.
-- One license covers two browser installations. Move it between devices at any time from the popup. No support ticket needed.
+- One license covers one browser installation. Move it to another device at any time from the popup. No support ticket needed.
 
 ## Privacy
 
