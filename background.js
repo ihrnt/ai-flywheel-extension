@@ -3,9 +3,9 @@
 
 const LICENSE_SERVICE_URL = "https://aiflywheel-extension.vercel.app";
 const CHECKOUT_LINKS = {
-  monthly: "https://buy.stripe.com/6oU4gt7QW7iZ1Ja70F1VK00",
-  yearly: "https://buy.stripe.com/dRmcMZefkbzfevW98N1VK01",
-  lifetime: "https://buy.stripe.com/7sY3cpc7cgTz2Ne1Gl1VK02"
+  monthly: `${LICENSE_SERVICE_URL}/api/checkout?plan=monthly`,
+  yearly: `${LICENSE_SERVICE_URL}/api/checkout?plan=yearly`,
+  lifetime: `${LICENSE_SERVICE_URL}/api/checkout?plan=lifetime`
 };
 const CHECKOUT_PLANS = new Set(Object.keys(CHECKOUT_LINKS));
 const LICENSE_RETRY_MS = 15 * 60 * 1000;
