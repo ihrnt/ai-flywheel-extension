@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Flywheel</title>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body class="free">
+
+<div class="pop-head">
+  <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></div>
+  <div class="wordmark">AI Flywheel</div>
+  <div class="ver" id="version"></div>
+</div>
+
+<div class="pop-body">
+
+  <div class="sec">
+    <div class="sec-head"><span class="eyebrow">TikTok</span></div>
+    <div class="row">
+      <span class="lbl nw">Sort by</span>
+      <select class="select" id="tt-sortBy" aria-label="TikTok sort field">
+        <option value="disabled">Disabled</option>
+        <option value="date">Upload date</option>
+        <option value="views">Views</option>
+        <option value="likes">Likes</option>
+        <option value="comments">Comments</option>
+        <option value="shares">Shares</option>
+        <option value="bookmarks">Bookmarks</option>
+      </select>
+      <span class="seg" id="tt-direction" role="group" aria-label="TikTok sort direction">
+        <button data-v="desc" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>Desc</button>
+        <button data-v="asc" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>Asc</button>
+      </span>
+    </div>
+    <div class="row"><span class="lbl">Sort creators by followers (search)</span><label class="switch"><input type="checkbox" id="tt-creatorSort"><span class="knob"></span></label></div>
+    <div class="row pro-row"><span class="lbl">Stat badges on posts</span><span class="prochip">Pro</span><label class="switch"><input type="checkbox" id="tt-badges"><span class="knob"></span></label></div>
+    <div class="row pro-row"><span class="lbl">Download buttons</span><span class="prochip">Pro</span><label class="switch"><input type="checkbox" id="tt-downloads"><span class="knob"></span></label></div>
+    <div class="row"><span class="lbl">Floating sort toolbar</span><label class="switch"><input type="checkbox" id="tt-toolbar"><span class="knob"></span></label></div>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="eyebrow">Instagram</span><span class="chip" id="ig-chip">Pro</span></div>
+    <div class="row pro-row">
+      <span class="lbl nw">Sort by</span>
+      <select class="select" id="ig-sortBy" aria-label="Instagram sort field">
+        <option value="disabled">Disabled</option>
+        <option value="likes">Likes</option>
+        <option value="comments">Comments</option>
+        <option value="reelViews">Reel views</option>
+        <option value="reelDate">Reel date</option>
+        <option value="postDate">Post date</option>
+      </select>
+      <span class="seg" id="ig-direction" role="group" aria-label="Instagram sort direction">
+        <button data-v="desc" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>Desc</button>
+        <button data-v="asc" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>Asc</button>
+      </span>
+    </div>
+    <div class="row pro-row"><span class="lbl">Stat badges on posts</span><label class="switch"><input type="checkbox" id="ig-badges"><span class="knob"></span></label></div>
+    <div class="row pro-row"><span class="lbl">Download buttons</span><label class="switch"><input type="checkbox" id="ig-downloads"><span class="knob"></span></label></div>
+    <div class="row pro-row"><span class="lbl">Floating sort toolbar</span><label class="switch"><input type="checkbox" id="ig-toolbar"><span class="knob"></span></label></div>
+    <div class="row pro-row"><span class="lbl">Video controls</span><label class="switch"><input type="checkbox" id="ig-videoControls"><span class="knob"></span></label></div>
+  </div>
+
+  <div class="sec" id="license-free">
+    <div class="sec-head"><span class="eyebrow">AI Flywheel Pro</span></div>
+    <p class="pro-copy">Unlock Instagram sorting, stat badges, downloads, and video controls on 2 devices.</p>
+    <div class="plan-list" aria-label="Choose an AI Flywheel Pro plan">
+      <button class="plan-button" data-plan="monthly" type="button">
+        <span class="plan-name">Monthly</span>
+        <span class="plan-price"><strong>$5</strong><small>/month</small></span>
+      </button>
+      <button class="plan-button recommended" data-plan="yearly" type="button">
+        <span><span class="plan-name">Yearly</span><small class="plan-note">Save $23</small></span>
+        <span class="plan-price"><strong>$37</strong><small>/year</small></span>
+      </button>
+      <button class="plan-button" data-plan="lifetime" type="button">
+        <span><span class="plan-name">Lifetime</span><small class="plan-note">Updates included</small></span>
+        <span class="plan-price"><strong>$147</strong><small>once</small></span>
+      </button>
+    </div>
+    <div class="emsg" id="checkout-error"></div>
+    <div class="license-return">
+      <p class="return-title">Already purchased?</p>
+      <label class="input-label" for="license-key">License key</label>
+      <div class="key-row">
+        <input class="input" id="license-key" type="text" placeholder="AFW-XXXXX-XXXXX-XXXXX-XXXXX" autocomplete="off" spellcheck="false">
+        <button class="btn-secondary" id="activate" type="button">Activate</button>
+      </div>
+      <div class="emsg" id="license-error"></div>
+      <div class="device-limit" id="device-limit"></div>
+    </div>
+  </div>
+
+  <div class="pro-active" id="license-pro">
+    <div class="pro-status">
+      <span class="check"><svg viewBox="0 0 24 24" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="4.5 12.75 10.5 18.75 19.5 5.25"/></svg></span>
+      <span><span class="txt">Pro active</span><span class="sub" id="licensed-to"></span><span class="sub" id="license-access"></span></span>
+    </div>
+    <div class="pro-actions">
+      <button class="manage" id="manage-plan" type="button">Manage billing</button>
+      <button class="manage" id="deactivate-device" type="button">Deactivate device</button>
+    </div>
+    <div class="emsg" id="manage-error"></div>
+  </div>
+
+</div>
+
+<div class="pop-foot">
+  <span class="left" id="footer-version"></span>
+  <span class="links"><a href="#" id="link-guide">Guide</a><a href="#" id="link-support">Support</a></span>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>
