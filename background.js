@@ -9,11 +9,12 @@ const CHECKOUT_LINKS = {
 };
 const CHECKOUT_PLANS = new Set(Object.keys(CHECKOUT_LINKS));
 const LICENSE_RETRY_MS = 15 * 60 * 1000;
+const OPTIONS_VERSION = 2;
 
 const DEFAULT_OPTIONS = {
   tiktok: {
     // sortBy: disabled | date | views | likes | comments | shares | bookmarks
-    sortBy: "views",
+    sortBy: "disabled",
     direction: "desc", // desc | asc
     creatorSort: true, // sort creators by followers on the search page
     badges: true,      // stat badges on posts (Pro)
@@ -22,7 +23,7 @@ const DEFAULT_OPTIONS = {
   },
   instagram: {
     // sortBy: disabled | likes | comments | reelDate | reelViews | postDate
-    sortBy: "reelViews",
+    sortBy: "disabled",
     direction: "desc",
     badges: true,
     downloads: true,
@@ -85,16 +86,76 @@ async function licenseRequest(path, body) {
   return result;
 }
 
-async function saveLicense(license) {
+async function saveLicense(license, { licenseKey = "", clearKey = false } = {}) {
+  const stored = await chrome.storage.local.get(["licenseKey", "licenseResumeAfter"]);
+  const cachedKey = clearKey ? "" : licenseKey || stored.licenseKey || "";
+  const resumeAfter = clearKey || license?.pro ? null : stored.licenseResumeAfter || null;
   const next = license?.pro
     ? { ...DEFAULT_LICENSE, ...license, lastCheckedAt: new Date().toISOString() }
     : { ...DEFAULT_LICENSE, status: license?.status || "inactive" };
-  await chrome.storage.local.set({ license: next });
+  await chrome.storage.local.set({ license: next, licenseKey: cachedKey, licenseResumeAfter: resumeAfter });
   return next;
 }
 
+function mergeOptions(options) {
+  return {
+    tiktok: { ...DEFAULT_OPTIONS.tiktok, ...(options?.tiktok || {}) },
+    instagram: { ...DEFAULT_OPTIONS.instagram, ...(options?.instagram || {}) },
+  };
+}
+
+async function ensureOptions() {
+  const stored = await chrome.storage.local.get(["options", "optionsVersion"]);
+  if (!stored.options) {
+    const options = mergeOptions(DEFAULT_OPTIONS);
+    await chrome.storage.local.set({ options, optionsVersion: OPTIONS_VERSION });
+    return options;
+  }
+  const options = mergeOptions(stored.options);
+  // The previous defaults enabled sorting. Migrate only those legacy default
+  // values, so an explicit non-default choice remains intact.
+  if (stored.optionsVersion !== OPTIONS_VERSION) {
+    if (options.tiktok.sortBy === "views") options.tiktok.sortBy = "disabled";
+    if (options.instagram.sortBy === "reelViews") options.instagram.sortBy = "disabled";
+  }
+  if (stored.optionsVersion !== OPTIONS_VERSION || JSON.stringify(options) !== JSON.stringify(stored.options)) {
+    await chrome.storage.local.set({ options, optionsVersion: OPTIONS_VERSION });
+  }
+  return options;
+}
+
+async function resumeCachedLicense() {
+  const stored = await chrome.storage.local.get(["license", "licenseKey", "licenseResumeAfter"]);
+  const retryAt = Date.parse(stored.licenseResumeAfter || "");
+  if (Number.isFinite(retryAt) && retryAt > Date.now()) return null;
+  const validStoredToken = stored.license?.pro && stored.license.token;
+  const resumable = !stored.license
+    || stored.license.status === "inactive"
+    || (stored.license.pro && !stored.license.token);
+  if (!stored.licenseKey || validStoredToken || !resumable) return null;
+  try {
+    const installationId = await ensureInstallationId();
+    const result = await licenseRequest("/api/licenses/activate", {
+      licenseKey: stored.licenseKey,
+      installationId,
+      deviceName: await deviceName()
+    });
+    if (!result.ok) {
+      await chrome.storage.local.set({ licenseResumeAfter: new Date(Date.now() + LICENSE_RETRY_MS).toISOString() });
+      return null;
+    }
+    return saveLicense(result.license, { licenseKey: stored.licenseKey });
+  } catch {
+    await chrome.storage.local.set({ licenseResumeAfter: new Date(Date.now() + LICENSE_RETRY_MS).toISOString() });
+    return null;
+  }
+}
+
 async function currentLicense() {
-  const { license } = await chrome.storage.local.get("license");
+  const stored = await chrome.storage.local.get(["license", "licenseKey"]);
+  const resumed = await resumeCachedLicense();
+  if (resumed) return resumed;
+  const { license } = stored;
   const current = { ...DEFAULT_LICENSE, ...(license || {}) };
   if (!current.pro) return current;
   // Remove licenses created by the retired local stub. Real Pro access always has a signed token.
@@ -119,19 +180,19 @@ async function currentLicense() {
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const stored = await chrome.storage.local.get(["options", "license", "installationId"]);
-  if (!stored.options) await chrome.storage.local.set({ options: DEFAULT_OPTIONS });
-  if (!stored.license) await chrome.storage.local.set({ license: DEFAULT_LICENSE });
+  await ensureOptions();
+  const stored = await chrome.storage.local.get(["license", "licenseKey", "installationId"]);
+  if (!stored.license) {
+    const resumed = await resumeCachedLicense();
+    if (!resumed) await chrome.storage.local.set({ license: DEFAULT_LICENSE });
+  }
   if (!stored.installationId) await ensureInstallationId();
 });
 
 const handlers = {
-  "afw:options:get": async () => {
-    const { options } = await chrome.storage.local.get("options");
-    return options || DEFAULT_OPTIONS;
-  },
+  "afw:options:get": ensureOptions,
   "afw:options:set": async (msg) => {
-    await chrome.storage.local.set({ options: msg.options });
+    await chrome.storage.local.set({ options: msg.options, optionsVersion: OPTIONS_VERSION });
     return { ok: true };
   },
   "afw:license:get": currentLicense,
@@ -154,7 +215,7 @@ const handlers = {
     if (msg.replaceDeviceId) body.replaceDeviceId = msg.replaceDeviceId;
     const result = await licenseRequest("/api/licenses/activate", body);
     if (!result.ok) return result;
-    const license = await saveLicense(result.license);
+    const license = await saveLicense(result.license, { licenseKey: key });
     return { ok: true, license };
   },
   "afw:license:portal": async () => {
@@ -171,13 +232,13 @@ const handlers = {
   },
   "afw:license:deactivate": async () => {
     const { license } = await chrome.storage.local.get("license");
-    if (!license?.token) return { ok: true, license: await saveLicense(DEFAULT_LICENSE) };
+    if (!license?.token) return { ok: true, license: await saveLicense(DEFAULT_LICENSE, { clearKey: true }) };
     const result = await licenseRequest("/api/licenses/deactivate", {
       token: license.token,
       installationId: await ensureInstallationId()
     });
     if (!result.ok) return result;
-    return { ok: true, license: await saveLicense(DEFAULT_LICENSE) };
+    return { ok: true, license: await saveLicense(DEFAULT_LICENSE, { clearKey: true }) };
   },
   "afw:download": async (msg) => {
     const options = {

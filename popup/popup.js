@@ -86,6 +86,14 @@ async function init() {
   renderOptions();
   renderLicense(stored.license || { pro: false });
 
+  // Ask once more after the first paint so background migrations, including
+  // the disabled sorting default, are reflected in the popup immediately.
+  const normalizedOptions = await send({ type: "afw:options:get" }).catch(() => null);
+  if (normalizedOptions) {
+    options = normalizedOptions;
+    renderOptions();
+  }
+
   // Re-validate the license in the background. currentLicense() writes the
   // fresh entitlement to storage, and the storage.onChanged listener above
   // re-renders if it changed - so this never blocks the popup from opening.

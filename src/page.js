@@ -164,26 +164,37 @@
       else if (label === "verified") about.verifiedAbout = valueFor(i, cells);
       else if (label === "former usernames") about.formerUsernames = valueFor(i, cells);
     }
-    if (about.username) {
-      aboutDataFor = normHandle(about.username); // tells the open-flow it can close now
-      send("profile", { platform: "instagram", profile: about });
-    }
+    if (about.username) send("profile", { platform: "instagram", profile: about });
   }
 
   // --- fetch patch -------------------------------------------------------
-  // URLs whose JSON we read: the feed graphql/v1 payloads plus the bloks
-  // "About this account" panel, which rides /async/wbloks/ (neither /graphql
-  // nor /api/v1/) and would otherwise be invisible to us.
+  // URLs whose JSON we read: feed/profile payloads plus the exact Bloks app
+  // used by "About this account". Unrelated /async/wbloks/ responses are not
+  // cloned or parsed.
   function watched(url) {
     return url.indexOf("/graphql") !== -1
       || url.indexOf("/api/v1/") !== -1
-      || url.indexOf("/async/wbloks/") !== -1
       || url.indexOf(ABOUT_APP) !== -1;
+  }
+
+  function forceAboutEnglish(args, url) {
+    if (url.indexOf(ABOUT_APP) === -1) return;
+    const request = args[0];
+    const init = args[1] || {};
+    const method = String(init.method || (request && request.method) || "GET").toUpperCase();
+    const body = init.body;
+    if (method !== "POST" || !body || typeof body.get !== "function" || typeof body.set !== "function") return;
+    try {
+      body.set("hl", "en");
+    } catch {
+      // Never let locale forcing break Instagram's request.
+    }
   }
 
   const nativeFetch = window.fetch;
   window.fetch = async function (...args) {
     const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+    forceAboutEnglish(args, url);
     const response = await nativeFetch.apply(this, args);
     try {
       if (watched(url)) {
@@ -225,19 +236,30 @@
 
   // SPA navigations: tell the isolated world the instant the route changes so
   // it does not have to rely on its 1s href poll.
+  let activeAboutCapture = null;
+  function cancelActiveAboutCapture() {
+    if (activeAboutCapture && normHandle(currentProfileUsername()) !== activeAboutCapture.key) {
+      activeAboutCapture.cleanup();
+    }
+  }
   const nativePush = history.pushState;
   const nativeReplace = history.replaceState;
   history.pushState = function () {
     const result = nativePush.apply(this, arguments);
+    cancelActiveAboutCapture();
     send("nav", { href: location.href });
     return result;
   };
   history.replaceState = function () {
     const result = nativeReplace.apply(this, arguments);
+    cancelActiveAboutCapture();
     send("nav", { href: location.href });
     return result;
   };
-  window.addEventListener("popstate", () => send("nav", { href: location.href }));
+  window.addEventListener("popstate", () => {
+    cancelActiveAboutCapture();
+    send("nav", { href: location.href });
+  });
 
   // Instagram web app id, needed to call the private /info/ endpoint. Read from
   // the page's script tags lazily (the DOM is not ready at document_start; and
@@ -258,112 +280,120 @@
   }
 
   // --- about-this-account auto-open --------------------------------------
-  // The About panel's data only loads when the dialog is opened. We open it
-  // invisibly: inject a style that hides any dialog so nothing flashes, click
-  // the header Options button, click the About item (its click makes IG fire
-  // the /async/wbloks/ request our fetch patch reads), then close and VERIFY
-  // closed before unhiding - a dialog must never be left open or invisible.
-  // The whole flow is a polled state machine with a navigation guard and at
-  // most two real attempts per profile; the isolated world keeps asking until
-  // the data lands, so a header that mounts late no longer strands the cards.
-  // Labels are matched in English (the logged-in UI locale). We never click
-  // any other menu item.
+  // Match the working extension's direct profile-username flow. The username
+  // opens the About dialog directly, while the entire dialog portal (including
+  // its backdrop) stays off-screen. Every transition uses animation frames, so
+  // a background tab cannot let an independent timer reveal a half-finished
+  // dialog.
   const aboutFlow = new Map(); // handle -> { attempts, running, done }
-  let aboutDataFor = null;     // set by handleAboutBody when a payload parses
+  const ABOUT_TRIGGER = 'header a[href="#"] h2';
+  const ABOUT_BUTTONS = 'body [role="dialog"] button';
+  const ABOUT_TIMEOUT_MS = 5000;
   function normHandle(v) {
-    const s = String(v || "").replace(/^@+/, "").trim();
+    const s = String(v || "").trim().replace(/^@+/, "").trim();
     return s ? s.toLowerCase() : null;
-  }
-  function findOptionsButton() {
-    const header = document.querySelector("main header");
-    const optSvg = header && header.querySelector('svg[aria-label="Options"]');
-    return (optSvg && (optSvg.closest('[role="button"],button,div[tabindex]') || optSvg.parentElement)) || null;
-  }
-  function topDialog() {
-    return document.querySelector('[role="dialog"]');
-  }
-  // One close gesture: prefer the dialog's own X button; fall back to Escape.
-  // Escape is only ever dispatched while a dialog exists, so it cannot leak
-  // into the page (or our own sorted view) after the dialog is gone.
-  function closeDialogOnce(dlg) {
-    const x = dlg.querySelector('svg[aria-label="Close"]');
-    const btn = x && (x.closest('[role="button"],button,div[tabindex]') || x.parentElement);
-    if (btn) { btn.click(); return; }
-    const esc = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true };
-    dlg.dispatchEvent(new KeyboardEvent("keydown", esc));
-    dlg.dispatchEvent(new KeyboardEvent("keyup", esc));
-    document.dispatchEvent(new KeyboardEvent("keydown", esc));
-    document.dispatchEvent(new KeyboardEvent("keyup", esc));
   }
   function triggerAboutAccount(username) {
     const key = normHandle(username);
     if (!key) return;
     const flow = aboutFlow.get(key) || { attempts: 0, running: false, done: false };
     aboutFlow.set(key, flow);
-    if (flow.done || flow.running || flow.attempts >= 2) return;
-    if (normHandle(currentProfileUsername()) !== key) return; // only on that profile's page
-    if (topDialog()) return; // a real dialog is open (the user's) - retry on a later ask
+    if (flow.done || flow.running || flow.attempts >= 1) return;
+    if (normHandle(currentProfileUsername()) !== key) return;
     flow.running = true;
 
     const hide = document.createElement("style");
     hide.setAttribute("data-afw-about", "1");
-    // Hide the whole portal (backdrop + dialog), not just the dialog box, so
-    // the page never visibly dims while we open and close it.
-    hide.textContent = 'body>div:has([role="dialog"]){opacity:0!important;pointer-events:none!important;}';
+    hide.textContent = 'body>div:has([role="dialog"]){opacity:0;position:fixed;left:100%;pointer-events:none;}';
 
-    const TICK = 150;
-    const BUDGET = { button: 40, menu: 24, data: 30, close: 24 }; // ticks per phase
-    let phase = "button";
-    let phaseTicks = 0;
+    let raf = 0;
+    let phase = "prime";
+    let phaseFrames = 0;
+    let startedAt = 0;
+    let attempted = false;
+    let finished = false;
+    let visibilityHandler = null;
 
-    const iv = setInterval(() => {
-      phaseTicks++;
-      const onProfile = normHandle(currentProfileUsername()) === key;
-
-      if (phase === "button") {
-        if (!onProfile) return done(false);
-        const btn = findOptionsButton();
-        if (btn && !topDialog()) {
-          flow.attempts++;
-          document.documentElement.appendChild(hide);
-          btn.click();
-          setPhase("menu");
-        } else if (phaseTicks > BUDGET.button) done(false);
-        return;
-      }
-      if (phase === "menu") {
-        if (!onProfile) return setPhase("close");
-        const dlg = topDialog();
-        const items = dlg ? [].slice.call(dlg.querySelectorAll('[role="button"],button')) : [];
-        const about = items.filter((el) => /about this account/i.test((el.textContent || "").trim()))[0];
-        if (about) {
-          about.click();
-          setPhase("data");
-        } else if (phaseTicks > BUDGET.menu) setPhase("close");
-        return;
-      }
-      if (phase === "data") {
-        if (!onProfile || aboutDataFor === key || phaseTicks > BUDGET.data) setPhase("close");
-        return;
-      }
-      // close: keep closing until every dialog is verifiably gone.
-      const dlg = topDialog();
-      if (!dlg) return done(aboutDataFor === key);
-      closeDialogOnce(dlg);
-      // Out of budget: unhide regardless. A visible dialog the user can close
-      // beats an invisible one that eats the page's clicks and scroll.
-      if (phaseTicks > BUDGET.close) done(false);
-    }, TICK);
-
-    function setPhase(next) {
-      phase = next;
-      phaseTicks = 0;
-    }
-    function done(ok) {
-      clearInterval(iv);
+    function finish() {
+      if (finished) return;
+      finished = true;
+      if (raf) cancelAnimationFrame(raf);
+      if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
       if (hide.parentNode) hide.remove();
+      if (activeAboutCapture && activeAboutCapture.cleanup === finish) activeAboutCapture = null;
       flow.running = false;
-      if (ok) flow.done = true;
+      if (attempted) flow.done = true;
+    }
+
+    function tick(now) {
+      if (finished) return;
+      if (normHandle(currentProfileUsername()) !== key) return finish();
+
+      if (phase === "prime") {
+        phase = "click";
+      } else if (phase === "click") {
+        const trigger = document.querySelector(ABOUT_TRIGGER);
+        if (!trigger || !document.body) {
+          flow.done = true;
+          return finish();
+        }
+        document.body.appendChild(hide);
+        attempted = true;
+        flow.attempts++;
+        startedAt = now;
+        try {
+          trigger.click();
+        } catch {
+          return finish();
+        }
+        phase = "dialog";
+        phaseFrames = 0;
+      } else if (phase === "dialog") {
+        const buttons = document.querySelectorAll(ABOUT_BUTTONS);
+        if (!buttons.length) {
+          phaseFrames = 0;
+          if (now - startedAt >= ABOUT_TIMEOUT_MS) return finish();
+        } else {
+          phaseFrames++;
+          if (phaseFrames >= 4) {
+            try {
+              buttons[buttons.length - 1].click();
+            } catch {
+              return finish();
+            }
+            phase = "cleanup";
+            phaseFrames = 0;
+          }
+        }
+      } else if (phase === "cleanup") {
+        phaseFrames++;
+        if (phaseFrames >= 3) return finish();
+      }
+
+      raf = requestAnimationFrame(tick);
+    }
+
+    function start() {
+      if (finished) return;
+      if (normHandle(currentProfileUsername()) !== key) return finish();
+      if (!document.querySelector(ABOUT_TRIGGER)) {
+        flow.done = true;
+        return finish();
+      }
+      raf = requestAnimationFrame(tick);
+    }
+
+    activeAboutCapture = { key, cleanup: finish };
+    if (document.hidden) {
+      visibilityHandler = function () {
+        if (document.hidden) return;
+        document.removeEventListener("visibilitychange", visibilityHandler);
+        visibilityHandler = null;
+        start();
+      };
+      document.addEventListener("visibilitychange", visibilityHandler);
+    } else {
+      start();
     }
   }
 

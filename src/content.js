@@ -65,6 +65,10 @@
   var profiles = new Map();   // username -> profile/account data
   var profileRequested = new Set();
   var profileHost = null;
+  var profileCache = window.AFW && window.AFW.profileCache;
+  var cachedAbout = new Map();
+  var aboutCacheReads = new Set();
+  var aboutCacheReady = new Set();
   var options = null;
   var license = { pro: false };
   var writing = false;        // pause the observer during our own DOM writes
@@ -295,8 +299,33 @@
   }
 
   function normalHandle(value) {
-    var s = String(value || "").replace(/^@+/, "").trim();
+    var s = String(value || "").trim().replace(/^@+/, "").trim();
     return s ? s.toLowerCase() : null;
+  }
+
+  function mergeCachedAbout(handle, profile) {
+    var key = normalHandle(handle);
+    var cached = key && cachedAbout.get(key);
+    if (!profileCache || !cached || !profile || !profile.profileLoaded || profile.aboutLoaded) return false;
+    return profileCache.mergeAbout(profile, cached);
+  }
+
+  function loadCachedAbout(handle) {
+    var key = normalHandle(handle);
+    if (!key || aboutCacheReads.has(key)) return;
+    aboutCacheReads.add(key);
+    if (!profileCache) {
+      aboutCacheReady.add(key);
+      schedule("native");
+      return;
+    }
+    profileCache.get(key).then(function (cached) {
+      if (cached) cachedAbout.set(key, cached);
+      aboutCacheReady.add(key);
+      var profile = profiles.get(key);
+      mergeCachedAbout(key, profile);
+      schedule("native");
+    });
   }
 
   function ingestProfile(profile) {
@@ -313,6 +342,15 @@
       if (prev[k] !== value) { prev[k] = value; changed = true; }
     }
     profiles.set(handle, prev);
+    if (profile.profileLoaded && mergeCachedAbout(handle, prev)) changed = true;
+    if (profile.aboutLoaded && profileCache) {
+      var cached = profileCache.createRecord(handle, profile, Date.now());
+      if (cached) {
+        cachedAbout.set(handle, cached);
+        aboutCacheReady.add(handle);
+        profileCache.put(handle, profile, cached.updatedAt);
+      }
+    }
     if (changed) schedule();
   }
 
@@ -323,21 +361,19 @@
     sendToPage("fetchProfile", { username: handle });
   }
 
-  // Ask the MAIN world to open the "About this account" dialog invisibly so its
-  // /async/wbloks/ payload (based in, join date, verified date, former
-  // usernames, ...) loads. Keep asking (throttled) until the data actually
-  // lands - the header's Options button often mounts after the first render,
-  // and a one-shot ask stranded the cards forever. The MAIN world caps real
-  // dialog-open attempts at two per profile, so repeated asks are no-ops.
-  var aboutAsked = new Map(); // handle -> last ask timestamp
+  // Ask once per profile session only after the normal profile response and
+  // persistent About cache lookup are ready. A fresh 24-hour cache skips the
+  // hidden interaction entirely.
+  var aboutAsked = new Set();
   function requestAbout(handle) {
     var key = normalHandle(handle);
     if (!key) return;
     var profile = profiles.get(key);
-    if (profile && profile.aboutLoaded) return;
-    var now = Date.now();
-    if (now - (aboutAsked.get(key) || 0) < 3000) return;
-    aboutAsked.set(key, now);
+    if (!profile || !profile.profileLoaded || profile.aboutLoaded) return;
+    if (!aboutCacheReady.has(key)) return;
+    if (profileCache && profileCache.isFresh(cachedAbout.get(key))) return;
+    if (aboutAsked.has(key)) return;
+    aboutAsked.add(key);
     sendToPage("fetchAbout", { username: handle });
   }
 
@@ -439,13 +475,15 @@
     var handle = profileHandle();
     if (!handle) { clearProfilePanel(); return; }
     requestProfile(handle);
+    loadCachedAbout(handle);
     var profile = profiles.get(normalHandle(handle));
-    if (!profile) { clearProfilePanel(); return; }
+    if (!profile || !profile.profileLoaded) { clearProfilePanel(); return; }
+    mergeCachedAbout(handle, profile);
     var cards = profileCards(profile);
     if (!cards.length) { clearProfilePanel(); return; }
     var target = profilePanelTarget();
     if (!target) { clearProfilePanel(); return; }
-    requestAbout(handle); // header is present now, so the Options button exists
+    requestAbout(handle);
     var key = normalHandle(handle) + "|" + cards.map(function (card) { return card.label + ":" + card.value; }).join("|");
     if (!profileHost) {
       profileHost = el("div", "afw-profile-panel");
@@ -703,7 +741,7 @@
     var close = el("button", "afw-sv-close", svg("<line x1='6' y1='6' x2='18' y2='18'/><line x1='18' y1='6' x2='6' y2='18'/>"));
     close.title = "Close sorted view";
     close.addEventListener("click", function () {
-      withDomWrites(function () { destroySortedView(true); });
+      disableSortingView();
       renderToolbar();
     });
     head.appendChild(sv.count);
@@ -1459,7 +1497,7 @@
     });
     toolbarRoot.querySelector("[data-a='sv']").addEventListener("click", function () {
       if (sv.open) {
-        withDomWrites(function () { destroySortedView(true); });
+        disableSortingView();
         renderToolbar();
       } else {
         sv.closedByUser = false;
@@ -1501,6 +1539,11 @@
     toolbarRenderKey = "";
     withDomWrites(renderData); // instant overlay + toolbar; badges follow
     schedule("native");
+  }
+
+  function disableSortingView() {
+    sv.closedByUser = true;
+    setSort("disabled", null);
   }
 
   // ---- reel video controls ---------------------------------------------
