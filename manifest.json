@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AI Flywheel Extension",
   "description": "Sort Instagram profiles, Reels, and Explore by real engagement. See the views, likes, and comments the app hides.",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -30,7 +30,7 @@
     },
     {
       "matches": ["*://*.tiktok.com/*", "*://*.instagram.com/*"],
-      "js": ["src/profile-cache.js", "src/ui/styles.js", "src/content.js"],
+      "js": ["src/profile-cache.js", "src/post-cache.js", "src/ui/styles.js", "src/content.js"],
       "run_at": "document_start"
     }
   ]

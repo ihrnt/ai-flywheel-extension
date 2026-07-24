@@ -23,6 +23,135 @@
     return direction === "asc" ? diff : -diff;
   }
 
+  // ---- filters ----------------------------------------------------------
+  // Every filter is additive and default-empty: with no filter set,
+  // recordPassesFilters returns true for every record, so the pipeline stays
+  // identical to the pre-filter behavior. The filter state lives inside
+  // options.instagram.filters (persisted by the background) and is mirrored
+  // locally via filtersVersion so rankInfo + the toolbar can memoize on it.
+  function defaultFilters() {
+    return {
+      minViews: null, maxViews: null,
+      minLikes: null, maxLikes: null,
+      minComments: null, maxComments: null,
+      paid: "any",
+      period: "all",
+      periodFrom: null, periodTo: null,
+      lastN: null,
+      collaborators: [], hashtags: [], tags: [], locations: []
+    };
+  }
+  function currentFilters() {
+    var f = options && options.instagram && options.instagram.filters;
+    return f ? f : defaultFilters();
+  }
+  function filtersActive() {
+    var f = currentFilters();
+    if (f.minViews != null || f.maxViews != null) return true;
+    if (f.minLikes != null || f.maxLikes != null) return true;
+    if (f.minComments != null || f.maxComments != null) return true;
+    if (f.paid && f.paid !== "any") return true;
+    if (f.period && f.period !== "all") return true;
+    if (f.lastN && f.lastN > 0) return true;
+    if (f.collaborators && f.collaborators.length) return true;
+    if (f.hashtags && f.hashtags.length) return true;
+    if (f.tags && f.tags.length) return true;
+    if (f.locations && f.locations.length) return true;
+    return false;
+  }
+  function activeFilterGroupCount() {
+    var f = currentFilters();
+    var n = 0;
+    if (f.minViews != null || f.maxViews != null || f.minLikes != null || f.maxLikes != null || f.minComments != null || f.maxComments != null) n++;
+    if (f.period !== "all" || (f.lastN && f.lastN > 0)) n++;
+    if (f.paid && f.paid !== "any") n++;
+    if (f.collaborators && f.collaborators.length) n++;
+    if (f.hashtags && f.hashtags.length) n++;
+    if (f.tags && f.tags.length) n++;
+    if (f.locations && f.locations.length) n++;
+    return n;
+  }
+  function hasAny(recValues, selected) {
+    if (!selected || !selected.length || !recValues || !recValues.length) return false;
+    var set = Object.create(null);
+    for (var i = 0; i < recValues.length; i++) set[String(recValues[i]).toLowerCase()] = true;
+    for (var j = 0; j < selected.length; j++) if (set[String(selected[j]).toLowerCase()]) return true;
+    return false;
+  }
+  function periodFromSec(f) {
+    var now = Math.floor(Date.now() / 1000);
+    if (f.period === "7d") return now - 7 * 86400;
+    if (f.period === "30d") return now - 30 * 86400;
+    if (f.period === "90d") return now - 90 * 86400;
+    if (f.period === "ytd") return Math.floor(new Date(new Date().getFullYear(), 0, 1).getTime() / 1000);
+    if (f.period === "custom") return f.periodFrom;
+    return null;
+  }
+  function periodToSec(f) {
+    if (f.period === "custom") return f.periodTo;
+    return null;
+  }
+  function recordPassesFilters(rec) {
+    if (!rec) return false;
+    if (!filtersActive()) return true;
+    var f = currentFilters();
+    if (f.minViews != null && (rec.plays == null || rec.plays < f.minViews)) return false;
+    if (f.maxViews != null && (rec.plays == null || rec.plays > f.maxViews)) return false;
+    if (f.minLikes != null && (rec.likes == null || rec.likes < f.minLikes)) return false;
+    if (f.maxLikes != null && (rec.likes == null || rec.likes > f.maxLikes)) return false;
+    if (f.minComments != null && (rec.comments == null || rec.comments < f.minComments)) return false;
+    if (f.maxComments != null && (rec.comments == null || rec.comments > f.maxComments)) return false;
+    if (f.paid === "paid" && !rec.paidPartnership) return false;
+    if (f.paid === "unpaid" && rec.paidPartnership) return false;
+    var from = periodFromSec(f), to = periodToSec(f);
+    if ((from || to) && rec.takenAt == null) return false;
+    if (from && rec.takenAt < from) return false;
+    if (to && rec.takenAt > to) return false;
+    if (f.collaborators && f.collaborators.length && !hasAny(rec.collaborators, f.collaborators)) return false;
+    if (f.hashtags && f.hashtags.length && !hasAny(rec.hashtags, f.hashtags)) return false;
+    if (f.tags && f.tags.length && !hasAny(rec.taggedUsers, f.tags)) return false;
+    if (f.locations && f.locations.length) {
+      if (!rec.location) return false;
+      if (f.locations.indexOf(String(rec.location).toLowerCase()) === -1) return false;
+    }
+    return true;
+  }
+  var filtersVersion = 0;
+  var filtersBumpedLocally = false;
+  function bumpFilters() {
+    filtersVersion++;
+    activeStore.rankCache = null;
+  }
+  // Safety-net: Chrome shadow-DOM number inputs sometimes swallow both `input`
+  // and `change` events, so typed values never reach the options object.  Read
+  // the DOM inputs directly and merge into the live filters if they differ.
+  // Called at the top of snapshotRecords() and filteredMembers() — cheap (a few
+  // querySelector + parseInt calls) and guarantees the stored filters stay in
+  // sync with what the user actually sees in the panel.
+  function pollFilterInputs() {
+    if (!filterRoot || !filterHost || filterHost.style.display === "none") return;
+    var f = currentFilters();
+    var next = null;
+    function ensure() { if (!next) next = cloneFilters(); }
+    filterRoot.querySelectorAll(".fi[data-rk]").forEach(function (input) {
+      var key = (input.dataset.rv === "min" ? "min" : "max") + input.dataset.rk;
+      var raw = input.value.trim();
+      var num = raw === "" ? null : parseInt(raw, 10);
+      if (!Number.isFinite(num)) num = null;
+      if (num !== f[key]) { ensure(); next[key] = num; }
+    });
+    // Custom lastN input (data-af='lastN') — only relevant when "Custom" is selected.
+    var lnInput = filterRoot.querySelector("[data-af='lastN']");
+    if (lnInput && lnInput.offsetParent !== null) {
+      var raw = lnInput.value.trim();
+      var num = raw === "" ? null : parseInt(raw, 10);
+      if (!Number.isFinite(num)) num = null;
+      else num = Math.max(1, num);
+      if (num !== f.lastN) { ensure(); next.lastN = num; }
+    }
+    if (next) setFilters(next);
+  }
+
   // ---- state ------------------------------------------------------------
   function surfaceInfo() {
     var path = location.pathname.replace(/\/+$/, "") || "/";
@@ -66,10 +195,53 @@
   var profileRequested = new Set();
   var profileHost = null;
   var profileCache = window.AFW && window.AFW.profileCache;
+  var postCache = window.AFW && window.AFW.postCache;
   var cachedAbout = new Map();
   var aboutCacheReads = new Set();
   var aboutCacheReady = new Set();
   var options = null;
+
+  // ---- post-record cache (IndexedDB, 24h) -------------------------------
+  // Loads a surface's cached records into the registry on entry so revisiting
+  // a profile the same day is instant. Writes are debounced and best-effort.
+  var cacheLoadRequested = new Set();
+  var cacheWriteTimer = null;
+  function loadCachedSurface(surface) {
+    if (!postCache || !surface || !surface.sortable) return;
+    if (cacheLoadRequested.has(surface.key)) return;
+    cacheLoadRequested.add(surface.key);
+    postCache.get(surface.key).then(function (entry) {
+      if (!entry || !entry.records || !entry.records.length) return;
+      // Only merge records we don't already have fresher data for. Flag them so
+      // a live fetch overwrites their (possibly stale) metrics.
+      var fresh = [];
+      for (var i = 0; i < entry.records.length; i++) {
+        var rec = entry.records[i];
+        if (rec && rec.pk && !registry.has(rec.pk)) {
+          rec.__afwFromCache = true;
+          fresh.push(rec);
+        }
+      }
+      if (fresh.length) ingest(fresh);
+    });
+  }
+  function scheduleCacheWrite() {
+    if (!postCache || !activeSurface.sortable) return;
+    if (cacheWriteTimer) clearTimeout(cacheWriteTimer);
+    cacheWriteTimer = setTimeout(function () {
+      cacheWriteTimer = null;
+      var key = activeSurface.key;
+      // Persist clean copies without the session-local internal flags.
+      var records = memberRecords().map(function (rec) {
+        var clean = {};
+        for (var k in rec) {
+          if (Object.prototype.hasOwnProperty.call(rec, k) && k.indexOf("__afw") !== 0) clean[k] = rec[k];
+        }
+        return clean;
+      });
+      postCache.put(key, records).catch(function () {});
+    }, 1500);
+  }
   var license = { pro: false };
   var writing = false;        // pause the observer during our own DOM writes
   var writingTimer = null;
@@ -80,6 +252,11 @@
       var rec = registry.get(pk);
       if (rec) out.push(rec);
     });
+    return out;
+  }
+  function filteredMembers() {
+    var out = memberRecords();
+    if (filtersActive()) out = out.filter(recordPassesFilters);
     return out;
   }
 
@@ -95,6 +272,7 @@
     activeSurface = next;
     activeStore = newRouteStore();
     toolbarRenderKey = "";
+    loadCachedSurface(next); // warm the registry from IndexedDB on a fresh surface
     return next;
   }
 
@@ -135,7 +313,11 @@
     sortAsc: "<line x1='4' y1='6' x2='8' y2='6'/><line x1='4' y1='12' x2='10' y2='12'/><line x1='4' y1='18' x2='12' y2='18'/><line x1='17' y1='19' x2='17' y2='5'/><polyline points='14 8 17 5 20 8'/>",
     scroll: "<rect x='7' y='3' width='10' height='14' rx='5'/><line x1='12' y1='7' x2='12' y2='10'/><polyline points='8 20 12 23 16 20'/>",
     top: "<line x1='5' y1='4' x2='19' y2='4'/><line x1='12' y1='20' x2='12' y2='8'/><polyline points='6 14 12 8 18 14'/>",
-    grid: "<rect x='3' y='3' width='7' height='7' rx='1'/><rect x='14' y='3' width='7' height='7' rx='1'/><rect x='3' y='14' width='7' height='7' rx='1'/><rect x='14' y='14' width='7' height='7' rx='1'/>"
+    grid: "<rect x='3' y='3' width='7' height='7' rx='1'/><rect x='14' y='3' width='7' height='7' rx='1'/><rect x='3' y='14' width='7' height='7' rx='1'/><rect x='14' y='14' width='7' height='7' rx='1'/>",
+    funnel: "<path d='M3 4h18l-7 8v6l-4 2v-8z'/>",
+    grip: "<circle cx='9' cy='6' r='1.4'/><circle cx='15' cy='6' r='1.4'/><circle cx='9' cy='12' r='1.4'/><circle cx='15' cy='12' r='1.4'/><circle cx='9' cy='18' r='1.4'/><circle cx='15' cy='18' r='1.4'/>",
+    search: "<circle cx='11' cy='11' r='7'/><line x1='21' y1='21' x2='16.65' y2='16.65'/>",
+    close: "<line x1='6' y1='6' x2='18' y2='18'/><line x1='18' y1='6' x2='6' y2='18'/>"
   };
   function svg(paths) {
     return "<svg viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'>" + paths + "</svg>";
@@ -238,7 +420,7 @@
     if (!node || node.nodeType !== 1) return false;
     if (node.id && node.id.indexOf("afw-") === 0) return true;
     if (node.classList && [].slice.call(node.classList).some(function (c) { return c.indexOf("afw-") === 0 && c !== "afw-tile" && c !== "afw-has-vc"; })) return true;
-    return !!(node.closest && node.closest("#afw-toolbar-host,#afw-menu-host,#afw-styles,#afw-sorted-host,#afw-profile-host,.afw-overlay,.afw-vc"));
+    return !!(node.closest && node.closest("#afw-toolbar-host,#afw-menu-host,#afw-filter-host,#afw-styles,#afw-sorted-host,#afw-profile-host,.afw-overlay,.afw-vc"));
   }
   function onlyAfwMutations(mutations) {
     for (var i = 0; i < mutations.length; i++) {
@@ -269,14 +451,25 @@
       var r = records[i];
       var prev = registry.get(r.pk);
       if (prev) {
-        // merge: fill nulls from the new record (e.g. /info/ adds caption/takenAt)
+        // When the existing record came from the 24h cache, a fresh fetch is
+        // authoritative: overwrite its metrics so a stale like/view count never
+        // survives the session. Otherwise merge: fill nulls (e.g. /info/ adds
+        // caption/takenAt) without clobbering fresher numbers.
+        var fromCache = prev.__afwFromCache === true;
         for (var k in r) {
-          if (r[k] != null && (prev[k] == null || (k === "takenAt" && prev.__afwTakenAtFromDom))) {
+          if (r[k] == null) continue;
+          var isMetric = k === "likes" || k === "comments" || k === "plays";
+          if (fromCache && isMetric) {
+            if (prev[k] !== r[k]) { prev[k] = r[k]; changed = true; }
+            continue;
+          }
+          if (prev[k] == null || (k === "takenAt" && prev.__afwTakenAtFromDom)) {
             prev[k] = r[k];
             if (k === "takenAt") delete prev.__afwTakenAtFromDom;
             changed = true;
           }
         }
+        if (fromCache) delete prev.__afwFromCache; // refreshed by live data
         // assets is never null, so upgrade it when /info/ brings the video the grid lacked
         var prevVid = (prev.assets || []).some(function (a) { return a.type === "video"; });
         var newVid = (r.assets || []).some(function (a) { return a.type === "video"; });
@@ -294,6 +487,12 @@
     }
     if (changed) {
       registryVersion++;
+      // Stop the load-scroll as soon as the target is reached; refresh progress.
+      if (scrollTimer && loadTarget) {
+        if (loadTargetMet()) stopAutoScroll();
+        else updateLoadStatus();
+      }
+      scheduleCacheWrite(); // persist the surface's records for instant revisit
       schedule("both");
     }
   }
@@ -684,13 +883,19 @@
     return activeSurface.kind === "profile-posts" ? "likes" : "reelViews";
   }
   function snapshotRecords(force) {
-    if (force || !activeStore.snapshotPks.length) {
-      activeStore.snapshotPks = sortedRecords(memberRecords()).map(function (rec) { return rec.pk; });
+    var f = currentFilters();
+    // lastN needs to re-derive the pool from the full filtered set each time,
+    // because a new arrival can be more recent than an in-snapshot record and
+    // bump it out of the window. Cheap on the visible set.
+    if (force || !activeStore.snapshotPks.length || (f.lastN && f.lastN > 0)) {
+      activeStore.snapshotPks = sortedRecords(filteredMembers()).map(function (rec) { return rec.pk; });
       activeStore.rankedCount = activeStore.snapshotPks.length;
     } else {
       var visible = new Set(activeStore.snapshotPks);
       activeStore.memberPks.forEach(function (pk) {
-        if (!visible.has(pk)) {
+        if (visible.has(pk)) return;
+        var rec = registry.get(pk);
+        if (!filtersActive() || (rec && recordPassesFilters(rec))) {
           activeStore.snapshotPks.push(pk);
           visible.add(pk);
         }
@@ -728,6 +933,7 @@
     sv.records = [];
     sv.open = false;
     if (byUser) sv.closedByUser = true;
+    closeFilterPanel();
     syncToolbarState();
   }
 
@@ -867,9 +1073,47 @@
   function renderSortedView() {
     var sort = currentSort();
     if (!igOn() || !activeSurface.sortable || sort.by === "disabled") { destroySortedView(false); return; }
-    var records = snapshotRecords(false);
-    if (!records.length) { if (sv.open) destroySortedView(false); return; }
     if (!sv.open && sv.closedByUser) return;
+    var records = snapshotRecords(false);
+    if (!records.length) {
+      // Don't destroy the view when filters produce 0 records - that would
+      // collapse the toolbar accordion and hide the filter button, trapping the
+      // user. Show an empty state instead, with the view still open so the
+      // filter button stays reachable.
+      if (filtersActive()) {
+        svEnsure();
+        sv.records = [];
+        // Unmount any tiles still on screen from before the filter emptied the
+        // set. svUpdateWindow early-returns on an empty record list, so it can't
+        // do this cleanup itself; without it the old tiles stay mounted (they're
+        // absolutely positioned, so the 0-height sizer doesn't hide them) and the
+        // filter looks like it did nothing until a refresh clears the mounts.
+        sv.mounted.forEach(function (tile) { tile.remove(); });
+        sv.mounted = new Map();
+        if (sv.count) {
+          var total = activeStore.memberPks.size;
+          sv.count.textContent = "0 of " + total + " posts match your filters";
+        }
+        if (sv.sizer) sv.sizer.style.height = "0px";
+        if (sv.scroller && !sv.scroller.querySelector(".afw-sv-empty")) {
+          var empty = el("div", "afw-sv-empty");
+          empty.style.cssText = "text-align:center;padding:60px 20px;color:#6E6E76;font:400 13px var(--afw-font,inherit)";
+          var msg = el("p", "", "No posts match the current filters.");
+          msg.style.margin = "0 0 12px";
+          var clear = el("button", "", "Clear filters");
+          clear.style.cssText = "height:32px;padding:0 14px;border:1px solid rgba(255,255,255,.10);border-radius:10px;background:#1C1C1E;color:#F4F4F5;font:600 12px inherit;cursor:pointer";
+          clear.addEventListener("click", clearFilters);
+          empty.appendChild(msg);
+          empty.appendChild(clear);
+          sv.scroller.appendChild(empty);
+        }
+        svLayout();
+        return;
+      }
+      // No filters active and no records: close as before.
+      if (sv.open) destroySortedView(false);
+      return;
+    }
     svEnsure();
     // Live re-rank while the user sits at the top of the overlay (fresh
     // arrivals sort straight in). Once they scroll, the order freezes and new
@@ -877,6 +1121,9 @@
     if (sv.scroller && sv.scroller.scrollTop < 50 && records.length > activeStore.rankedCount) {
       records = snapshotRecords(true);
     }
+    // Remove stale empty-state if records came back.
+    var staleEmpty = sv.scroller && sv.scroller.querySelector(".afw-sv-empty");
+    if (staleEmpty) staleEmpty.remove();
     sv.records = records;
     var shown = records.length;
     var added = Math.max(0, shown - activeStore.rankedCount);
@@ -1074,14 +1321,14 @@
     if (values.length < 3) return null;
     return robustBaseline(values);
   }
-  // Ranks + breakout multipliers over the route's records, memoized by
-  // (registry version, sort field). Recomputed only when new data lands or the
-  // sort changes - not on every DOM churn render.
+  // Ranks + breakout multipliers over the route's FILTERED records, memoized by
+  // (registry version, sort field, filters version). Recomputed only when new
+  // data lands, the sort changes, or a filter changes - not on every DOM churn.
   function rankInfo() {
     var field = performanceField(currentSort().by);
     var cache = activeStore.rankCache;
-    if (cache && cache.version === registryVersion && cache.field === field) return cache;
-    var records = memberRecords();
+    if (cache && cache.version === registryVersion && cache.field === field && cache.filtersVersion === filtersVersion) return cache;
+    var records = filteredMembers();
     var ranked = records.filter(function (rec) { return rec && rec[field] != null; })
       .sort(function (a, b) { return b[field] - a[field]; });
     var rankByPk = new Map();
@@ -1095,7 +1342,7 @@
         if (ratio >= 2) breakoutByPk.set(rec.pk, fmtX(ratio));
       });
     }
-    cache = { version: registryVersion, field: field, rankByPk: rankByPk, breakoutByPk: breakoutByPk };
+    cache = { version: registryVersion, field: field, filtersVersion: filtersVersion, rankByPk: rankByPk, breakoutByPk: breakoutByPk };
     activeStore.rankCache = cache;
     return cache;
   }
@@ -1338,10 +1585,11 @@
       clearInterval(scrollTimer);
       scrollTimer = null;
       renderToolbar();
+      updateLoadStatus();
     }
   }
-  function toggleAutoScroll() {
-    if (scrollTimer) { stopAutoScroll(); return; }
+  function startScroll() {
+    if (scrollTimer) return;
     var stuck = 0, lastY = -1;
     scrollTimer = setInterval(function () {
       var doc = document.scrollingElement || document.documentElement;
@@ -1354,9 +1602,76 @@
     }, 33);
     renderToolbar();
   }
+  function toggleAutoScroll() {
+    if (scrollTimer) { stopAutoScroll(); return; }
+    startScroll();
+  }
+
+  // ---- load-to-target ---------------------------------------------------
+  // When the user sets a load range (date period or lastN), auto-scroll until
+  // the target is reached, then stop. "Loading" shows in the filter panel.
+  var loadTarget = null; // { kind: "lastN"|"period", n?: number, fromSec?: number }
+  function oldestTakenAt() {
+    var oldest = null;
+    activeStore.memberPks.forEach(function (pk) {
+      var rec = registry.get(pk);
+      if (rec && rec.takenAt != null && (oldest == null || rec.takenAt < oldest)) oldest = rec.takenAt;
+    });
+    return oldest;
+  }
+  function computeLoadTarget() {
+    var f = currentFilters();
+    if (f.lastN && f.lastN > 0) return { kind: "lastN", n: f.lastN };
+    var from = periodFromSec(f);
+    if (from) return { kind: "period", fromSec: from };
+    return null;
+  }
+  function loadTargetMet() {
+    if (!loadTarget) return true;
+    if (loadTarget.kind === "lastN") return activeStore.memberPks.size >= loadTarget.n;
+    var oldest = oldestTakenAt();
+    // Reached when the oldest loaded post is at/older than the range start.
+    // oldest == null means we have no dated records yet, so keep scrolling.
+    return oldest != null && oldest <= loadTarget.fromSec;
+  }
+  function maybeStartLoadScroll() {
+    loadTarget = computeLoadTarget();
+    if (!loadTarget) { stopAutoScroll(); updateLoadStatus(); return; }
+    if (loadTargetMet()) { stopAutoScroll(); updateLoadStatus(); return; }
+    startScroll();
+    updateLoadStatus();
+  }
+  function loadStatusText() {
+    var loaded = activeStore.memberPks.size;
+    if (!loadTarget) return "";
+    if (loadTarget.kind === "lastN") return "Loading posts… " + Math.min(loaded, loadTarget.n) + " / " + loadTarget.n;
+    return "Loading posts from the selected period… " + loaded + " loaded";
+  }
+  function updateLoadStatus() {
+    if (!filterRoot) return;
+    var row = filterRoot.querySelector("[data-asrow]");
+    if (!row) return;
+    var active = !!scrollTimer && !!loadTarget && !loadTargetMet();
+    row.classList.toggle("show", active);
+    var txt = filterRoot.querySelector("[data-astxt]");
+    if (txt) txt.textContent = loadStatusText();
+  }
   function sortedRecords(records) {
     var s = currentSort();
     var out = records.slice();
+    if (filtersActive()) out = out.filter(recordPassesFilters);
+    // lastN: keep only the N most recent by takenAt, independent of the chosen
+    // sort. "Last 20 reels sorted by views" = the 20 most recent, ranked by views.
+    var f = currentFilters();
+    if (f.lastN && f.lastN > 0 && out.length > f.lastN) {
+      var byDate = out.slice().sort(function (a, b) {
+        var at = a.takenAt || 0, bt = b.takenAt || 0;
+        return bt - at;
+      });
+      var keep = new Set();
+      for (var i = 0; i < byDate.length && i < f.lastN; i++) keep.add(byDate[i].pk);
+      out = out.filter(function (r) { return keep.has(r.pk); });
+    }
     if (s.by !== "disabled") out.sort(function (a, b) { return compareRecords(a, b, s.by, s.dir); });
     return out;
   }
@@ -1405,7 +1720,56 @@
     toolbarHost.style.cssText = "position:fixed;left:50%;top:4px;width:max-content;max-width:calc(100vw - 24px);transform:translateX(-50%);z-index:2147483000;";
     toolbarRoot = toolbarHost.attachShadow({ mode: "open" });
     document.body.appendChild(toolbarHost);
+    chrome.storage.local.get("afwToolbarPos", function (res) {
+      if (res.afwToolbarPos && toolbarHost) applyToolbarPos(res.afwToolbarPos.x, res.afwToolbarPos.y);
+    });
     renderToolbar();
+  }
+  function applyToolbarPos(x, y) {
+    if (!toolbarHost) return;
+    toolbarHost.style.transform = "none";
+    toolbarHost.style.left = x + "px";
+    toolbarHost.style.top = y + "px";
+  }
+  function clampToolbarPos() {
+    if (!toolbarHost) return;
+    if (toolbarHost.style.transform === "none") {
+      var rect = toolbarHost.getBoundingClientRect();
+      var x = Math.max(4, Math.min(window.innerWidth - rect.width - 4, rect.left));
+      var y = Math.max(4, Math.min(window.innerHeight - 40, rect.top));
+      applyToolbarPos(x, y);
+    }
+  }
+  var dragState = null;
+  function onToolbarDragStart(e) {
+    if (e.button !== 0 || !toolbarHost) return;
+    closeFilterPanel();
+    var rect = toolbarHost.getBoundingClientRect();
+    dragState = { offX: e.clientX - rect.left, offY: e.clientY - rect.top, moved: false };
+    document.addEventListener("mousemove", onToolbarDragMove);
+    document.addEventListener("mouseup", onToolbarDragEnd);
+  }
+  function onToolbarDragMove(e) {
+    if (!dragState) return;
+    dragState.moved = true;
+    var rect = toolbarHost.getBoundingClientRect();
+    var x = e.clientX - dragState.offX;
+    var y = e.clientY - dragState.offY;
+    x = Math.max(4, Math.min(window.innerWidth - rect.width - 4, x));
+    y = Math.max(4, Math.min(window.innerHeight - 40, y));
+    toolbarHost.style.transform = "none";
+    toolbarHost.style.left = x + "px";
+    toolbarHost.style.top = y + "px";
+  }
+  function onToolbarDragEnd() {
+    if (!dragState) return;
+    if (dragState.moved && toolbarHost.style.transform === "none") {
+      var rect = toolbarHost.getBoundingClientRect();
+      chrome.storage.local.set({ afwToolbarPos: { x: rect.left, y: rect.top } });
+    }
+    dragState = null;
+    document.removeEventListener("mousemove", onToolbarDragMove);
+    document.removeEventListener("mouseup", onToolbarDragEnd);
   }
   // Everything that changes without a sort change (counts, sv open/closed,
   // scroll state, re-rank hint) is synced in place - the shadow DOM is only
@@ -1417,8 +1781,12 @@
     if (!wrap) return;
     var shown = activeStore.snapshotPks.length;
     var added = Math.max(0, shown - activeStore.rankedCount);
-    var countLabel = shown ? shown + " shown" + (added ? " · " + added + " added" : "") : activeStore.memberPks.size + " loaded";
+    var total = activeStore.memberPks.size;
+    var countLabel = shown
+      ? (filtersActive() && shown < total ? shown + " of " + total + " shown" : shown + " shown") + (added ? " · " + added + " added" : "")
+      : (filtersActive() ? "0 of " + total : total) + " loaded";
     wrap.classList.toggle("sv-on", !!sv.open);
+    wrap.classList.toggle("filters-on", filtersActive());
     var svBtn = toolbarRoot.querySelector("[data-a='sv']");
     if (svBtn) {
       svBtn.classList.toggle("on", !!sv.open);
@@ -1433,6 +1801,16 @@
     if (scrollBtn) {
       scrollBtn.classList.toggle("on", !!scrollTimer);
       scrollBtn.title = scrollTimer ? "Stop scroll" : "Start scroll";
+    }
+    var filterBtn = toolbarRoot.querySelector("[data-a='filter']");
+    if (filterBtn) {
+      var n = activeFilterGroupCount();
+      filterBtn.classList.toggle("on", n > 0);
+      filterBtn.title = n ? n + " filter group" + (n > 1 ? "s" : "") + " active" : "Filter";
+      var dot = filterBtn.querySelector(".fdot");
+      if (n > 0 && !dot) filterBtn.appendChild(el("span", "fdot", String(n)));
+      else if (n > 0 && dot) dot.textContent = String(n);
+      else if (dot) dot.remove();
     }
     var cnt = toolbarRoot.querySelector(".cnt");
     if (cnt && cnt.textContent !== countLabel) cnt.textContent = countLabel;
@@ -1468,18 +1846,24 @@
       ".speed b{min-width:14px;color:#F4F4F5;font-variant-numeric:tabular-nums}" +
       ".div{width:1px;height:16px;background:rgba(255,255,255,.10);flex:none}" +
       ".cnt{font:400 11px inherit;color:#6E6E76;font-variant-numeric:tabular-nums;padding:0 6px 0 2px;white-space:nowrap}" +
+      ".grip{width:14px;height:28px;display:flex;align-items:center;justify-content:center;cursor:grab;flex:none;opacity:.45}" +
+      ".grip:hover{opacity:1}.grip:active{cursor:grabbing}.grip svg{width:10px;height:14px;fill:#6E6E76}" +
+      ".ib{position:relative}" +
+      ".fdot{position:absolute;top:-3px;right:-3px;min-width:14px;height:14px;padding:0 3px;border-radius:9999px;background:#BEF264;color:#0A0A0B;font:700 9px inherit;display:flex;align-items:center;justify-content:center;pointer-events:none}" +
       // Accordion: the sort controls only exist for the sorted view, so they
       // stay collapsed behind the grid toggle until it is switched on.
       ".acc{display:inline-flex;align-items:center;gap:8px;max-width:0;opacity:0;overflow:hidden;transition:max-width .28s ease,opacity .18s ease}" +
-      ".w.sv-on .acc{max-width:480px;opacity:1}" +
+      ".w.sv-on .acc{max-width:560px;opacity:1}" +
       "@media(max-width:620px){.w{max-width:calc(100vw - 16px);gap:6px}.seg button{padding:0 7px}.speed{order:2;width:100%;justify-content:center}.cnt{display:none}.w.sv-on .acc{flex-wrap:wrap}}" +
       "</style>" +
       "<div class='w'>" +
+      "<span class='grip' data-a='grip' title='Drag to move'><svg viewBox='0 0 24 24' fill='#6E6E76'>" + ICONS.grip + "</svg></span>" +
       "<button class='ib' data-a='sv'><svg viewBox='0 0 24 24'>" + ICONS.grid + "</svg></button>" +
       "<span class='acc'>" +
       "<button class='ib' data-a='rerank'><svg viewBox='0 0 24 24'><path d='M21 12a9 9 0 1 1-2.64-6.36'/><polyline points='21 3 21 9 15 9'/></svg></button>" +
       "<span class='seg'>" + seg + "</span>" +
       "<button class='ib' data-a='dir' title='" + dirLabel + "'><svg viewBox='0 0 24 24'>" + dirIcon + "</svg></button>" +
+      "<button class='ib' data-a='filter' title='Filter'><svg viewBox='0 0 24 24'>" + ICONS.funnel + "</svg></button>" +
       "<span class='div'></span>" +
       "</span>" +
       "<label class='speed' title='Scroll speed'>Speed <input data-a='speed' type='range' min='2' max='30' step='1' value='" + scrollSpeed + "'><b>" + scrollSpeed + "</b></label>" +
@@ -1521,6 +1905,14 @@
       var out = toolbarRoot.querySelector(".speed b");
       if (out) out.textContent = scrollSpeed;
     });
+    var grip = toolbarRoot.querySelector("[data-a='grip']");
+    if (grip) grip.addEventListener("mousedown", onToolbarDragStart);
+    var filterBtn = toolbarRoot.querySelector("[data-a='filter']");
+    if (filterBtn) filterBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (filterHost && filterHost.style.display !== "none") closeFilterPanel();
+      else openFilterPanel(filterBtn);
+    });
     syncToolbarState();
   }
   function showToolbar(on) {
@@ -1528,7 +1920,426 @@
     else {
       stopAutoScroll();
       if (toolbarHost) toolbarHost.style.display = "none";
+      closeFilterPanel();
     }
+  }
+
+  // ---- filter popover (shadow DOM) -------------------------------------
+  // Same shell pattern as the download menu: a fixed shadow-DOM host anchored
+  // under the filter button. The panel rebuilds its values from the live
+  // filters object on every open + on every setFilters while open.
+  var filterHost = null, filterRoot = null, filterPollTimer = null;
+  function ensureFilterPanel() {
+    if (filterHost) return;
+    filterHost = el("div");
+    filterHost.id = "afw-filter-host";
+    filterHost.style.cssText = "position:fixed;z-index:2147483002;display:none;";
+    filterRoot = filterHost.attachShadow({ mode: "open" });
+    document.body.appendChild(filterHost);
+    document.addEventListener("click", function (e) {
+      if (filterHost.style.display !== "none" && !filterHost.contains(e.target)) {
+        var btn = toolbarRoot && toolbarRoot.querySelector("[data-a='filter']");
+        if (!btn || !btn.contains(e.target)) closeFilterPanel();
+      }
+    }, true);
+    window.addEventListener("scroll", closeFilterPanel, true);
+    window.addEventListener("resize", closeFilterPanel, true);
+  }
+  function closeFilterPanel() {
+    if (filterHost) {
+      pollFilterInputs(); // one last sync before hiding
+      filterHost.style.display = "none";
+    }
+    if (filterPollTimer) { clearInterval(filterPollTimer); filterPollTimer = null; }
+  }
+  function openFilterPanel(anchor) {
+    ensureFilterPanel();
+    renderFilterPanel();
+    filterHost.style.display = "";
+    // Attach directly below the toolbar at the same width, so it reads as the
+    // toolbar extending downward. Min width keeps metric ranges comfortable.
+    var tr = toolbarHost ? toolbarHost.getBoundingClientRect() : anchor.getBoundingClientRect();
+    var pw = Math.max(420, tr.width);
+    filterHost.style.left = tr.left + "px";
+    filterHost.style.width = pw + "px";
+    filterHost.style.top = (tr.bottom + 4) + "px";
+    // Clamp right edge to viewport.
+    if (tr.left + pw > window.innerWidth - 8) {
+      filterHost.style.left = Math.max(8, window.innerWidth - pw - 8) + "px";
+    }
+    // Clamp bottom to viewport (scroll inside the panel handles the overflow).
+    var ph = filterHost.offsetHeight;
+    if (tr.bottom + 4 + ph > window.innerHeight - 8) {
+      filterHost.style.top = Math.max(8, window.innerHeight - ph - 8) + "px";
+    }
+    updateLoadStatus();
+    // Poll number inputs every 300ms as a safety-net for Chrome shadow-DOM
+    // event bugs — silently picks up typed/spun values that the events miss.
+    if (filterPollTimer) clearInterval(filterPollTimer);
+    filterPollTimer = setInterval(pollFilterInputs, 300);
+  }
+
+  function escAttr(s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/'/g, "&#39;").replace(/</g, "&lt;");
+  }
+
+  var PERIOD_OPTS = [
+    ["all", "All"], ["7d", "7d"], ["30d", "30d"], ["90d", "90d"], ["ytd", "Year"], ["custom", "Custom"]
+  ];
+  var PAID_OPTS = [["any", "Any"], ["paid", "Paid"], ["unpaid", "Not paid"]];
+  var LASTN_OPTS = [["0", "All"], ["25", "25"], ["50", "50"], ["100", "100"], ["500", "500"], ["-1", "Custom"]];
+
+  // All values below match design-system.html tokens exactly.
+  function filterCSS() {
+    return "<style>" +
+      ":host{all:initial}*{box-sizing:border-box;font-family:'Geist',Inter,system-ui,-apple-system,sans-serif}" +
+      ".fp{width:100%;max-height:calc(100vh - 32px);overflow-y:auto;background:#1C1C1E;border:1px solid rgba(255,255,255,.10);border-radius:12px;box-shadow:0 10px 30px -10px rgba(0,0,0,.6)}" +
+      // header
+      ".fh{display:flex;align-items:center;justify-content:space-between;padding:10px 12px 8px}" +
+      ".fh-label{font:600 11px inherit;letter-spacing:.05em;text-transform:uppercase;color:#6E6E76}" +
+      // eyebrow section label (design-system .eyebrow)
+      ".sl{font:600 11px inherit;letter-spacing:.05em;text-transform:uppercase;color:#6E6E76;margin-bottom:10px}" +
+      // sections
+      ".sec{padding:12px;border-top:1px solid rgba(255,255,255,.05)}" +
+      ".sec:first-of-type{border-top:0}" +
+      // metric range rows
+      ".rr{display:flex;align-items:center;gap:6px;margin-bottom:8px}.rr:last-child{margin-bottom:0}" +
+      ".rl{width:76px;flex:none;font:500 12px inherit;color:#A6A6AD}" +
+      // input field (design-system .field, dense 28px for ranges)
+      ".fi{width:0;flex:1;height:28px;padding:0 10px;border:1px solid rgba(255,255,255,.10);border-radius:12px;background:transparent;color:#F4F4F5;font:400 12px inherit;font-variant-numeric:tabular-nums}" +
+      ".fi:focus{outline:none;border-color:#BEF264}" +
+      ".fi::placeholder{color:#6E6E76}" +
+      ".fdash{color:#6E6E76;flex:none;font:400 12px inherit}" +
+      // segmented control (design-system .seg.dense)
+      ".fseg{display:inline-flex;height:28px;border:1px solid rgba(255,255,255,.10);border-radius:12px;padding:2px;gap:2px}" +
+      ".fseg button{height:22px;padding:0 11px;border:0;border-radius:7px;background:transparent;color:#A6A6AD;font:500 11px inherit;cursor:pointer;white-space:nowrap}" +
+      ".fseg button:hover{background:rgba(255,255,255,.06);color:#F4F4F5}" +
+      ".fseg button.on{background:#BEF264;color:#0A0A0B;font-weight:600}" +
+      // custom date row
+      ".cdate{display:flex;gap:6px;margin-top:8px}.cdate.hidden{display:none}" +
+      ".cdate input{flex:1;height:28px;padding:0 8px;border:1px solid rgba(255,255,255,.10);border-radius:12px;background:transparent;color:#F4F4F5;font:400 11px inherit;font-variant-numeric:tabular-nums}" +
+      ".cdate input:focus{outline:none;border-color:#BEF264}" +
+      ".cdate input::-webkit-calendar-picker-indicator{filter:invert(.7)}" +
+      // chip group
+      ".cg-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}" +
+      ".cg-actions{display:flex;gap:2px}" +
+      // search field
+      ".csearch{position:relative;margin-bottom:8px}" +
+      ".csearch svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:12px;height:12px;stroke:#6E6E76;fill:none;stroke-width:2;pointer-events:none}" +
+      ".csearch input{width:100%;height:28px;padding:0 10px 0 28px;border:1px solid rgba(255,255,255,.10);border-radius:12px;background:transparent;color:#F4F4F5;font:400 11px inherit}" +
+      ".csearch input:focus{outline:none;border-color:#BEF264}" +
+      // chip list (design-system .chip)
+      ".clist{display:flex;flex-wrap:wrap;gap:4px;max-height:108px;overflow-y:auto}" +
+      ".chip{display:inline-flex;align-items:center;height:26px;padding:0 10px;border:1px solid rgba(255,255,255,.10);border-radius:9999px;background:#141415;color:#A6A6AD;font:500 11px inherit;cursor:pointer;white-space:nowrap}" +
+      ".chip:hover{background:rgba(255,255,255,.06);color:#F4F4F5}" +
+      ".chip.on{background:#BEF264;border-color:#BEF264;color:#0A0A0B;font-weight:600}" +
+      ".empty{font:400 11px inherit;color:#6E6E76;padding:4px 0}" +
+      // buttons (design-system .btn-secondary)
+      ".btn2{display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 12px;border:1px solid rgba(255,255,255,.10);border-radius:12px;background:transparent;color:#F4F4F5;font:600 11px inherit;cursor:pointer}" +
+      ".btn2:hover{background:rgba(255,255,255,.06)}" +
+      ".btn2.lime{background:#BEF264;border-color:#BEF264;color:#0A0A0B}" +
+      ".btn2.lime:hover{background:#CDF57E}" +
+      ".btn2.ghost{border-color:transparent;color:#A6A6AD}" +
+      ".btn2.ghost:hover{color:#F4F4F5;background:rgba(255,255,255,.06)}" +
+      // hint footer
+      ".hint{padding:8px 12px 10px;font:400 10.5px inherit;color:#6E6E76;line-height:1.4;border-top:1px solid rgba(255,255,255,.05)}" +
+      // load-range 2-col grid
+      ".grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}" +
+      ".gcol{min-width:0}" +
+      ".gcol .fseg{flex-wrap:wrap;height:auto}" +
+      // auto-scroll status row
+      ".asrow{display:none;align-items:center;gap:8px;margin-top:10px;padding:7px 10px;border:1px solid rgba(190,242,100,.30);border-radius:10px;background:rgba(190,242,100,.08)}" +
+      ".asrow.show{display:flex}" +
+      ".asrow .spin{width:12px;height:12px;flex:none}" +
+      ".asrow .spin svg{width:12px;height:12px;stroke:#BEF264;animation:afwspin 1s linear infinite}" +
+      "@keyframes afwspin{to{transform:rotate(360deg)}}" +
+      ".asrow .astxt{flex:1;font:500 11px inherit;color:#F4F4F5;font-variant-numeric:tabular-nums}" +
+      ".asrow .asstop{flex:none;height:22px;padding:0 9px;border:1px solid rgba(255,255,255,.10);border-radius:8px;background:transparent;color:#A6A6AD;font:600 10px inherit;cursor:pointer}" +
+      ".asrow .asstop:hover{background:rgba(255,255,255,.06);color:#F4F4F5}" +
+      "</style>";
+  }
+
+  function renderRangeRow(label, key, min, max) {
+    return "<div class='rr'>" +
+      "<span class='rl'>" + label + "</span>" +
+      "<input class='fi' data-rk='" + key + "' data-rv='min' type='number' min='0' placeholder='min' value='" + (min != null ? min : "") + "'>" +
+      "<span class='fdash'>–</span>" +
+      "<input class='fi' data-rk='" + key + "' data-rv='max' type='number' min='0' placeholder='max' value='" + (max != null ? max : "") + "'>" +
+      "</div>";
+  }
+  function renderSeg(name, opts, active) {
+    return "<span class='fseg' data-fn='" + name + "'>" +
+      opts.map(function (o) {
+        return "<button data-v='" + o[0] + "' class='" + (o[0] === active ? "on" : "") + "'>" + o[1] + "</button>";
+      }).join("") + "</span>";
+  }
+
+  function renderChipGroup(name, label, facets, selected) {
+    var sel = selected || [];
+    // Selected chips float to the top so the user sees what's active at a glance.
+    var ordered = sel.slice().concat(facets.filter(function (v) { return sel.indexOf(v) === -1; }));
+    var chips = ordered.map(function (v) {
+      var on = sel.indexOf(v) !== -1;
+      return "<button class='chip" + (on ? " on" : "") + "' data-fn='" + name + "' data-v='" + escAttr(v) + "'>" + escAttr(v) + "</button>";
+    }).join("");
+    var none = facets.length ? "" : "<span class='empty'>No " + label.toLowerCase() + " in loaded posts</span>";
+    return "<div class='cg' data-fn='" + name + "'>" +
+      "<div class='cg-head'>" +
+      "<span class='sl' style='margin-bottom:0'>" + label + "</span>" +
+      "<span class='cg-actions'>" +
+      "<button class='btn2 ghost' data-act='all' data-fn='" + name + "'>Select all</button>" +
+      "<button class='btn2 ghost' data-act='clear' data-fn='" + name + "'>Clear</button>" +
+      "</span>" +
+      "</div>" +
+      "<div class='csearch'><svg viewBox='0 0 24 24'>" + ICONS.search + "</svg><input data-sf='" + name + "' type='text' placeholder='Search " + label.toLowerCase() + "' value=''></div>" +
+      "<div class='clist' data-fn='" + name + "'>" + chips + none + "</div>" +
+      "</div>";
+  }
+
+  function lastNMode() {
+    var n = currentFilters().lastN;
+    if (n == null) return "0";
+    var s = String(n);
+    for (var i = 0; i < LASTN_OPTS.length; i++) if (LASTN_OPTS[i][0] === s) return s;
+    return "-1"; // custom
+  }
+
+  function renderFilterPanel() {
+    if (!filterRoot) return;
+    var f = currentFilters();
+    var facets = computeFacets();
+    var unit = (activeSurface.kind === "profile-reels" || activeSurface.kind === "reels-feed") ? "reels" : "posts";
+    var lnMode = lastNMode();
+    var showCustom = lnMode === "-1";
+    filterRoot.innerHTML = filterCSS() +
+      "<div class='fp'>" +
+      "<div class='fh'><span class='fh-label'>Filters</span><button class='btn2 ghost' data-act='clearall'>Clear all</button></div>" +
+      // LOAD RANGE: how many posts to pull in, then refine below.
+      "<div class='sec'>" +
+      "<div class='sl'>Load range</div>" +
+      "<div class='grid2'>" +
+      "<div class='gcol'>" +
+      "<div class='sl' style='margin-bottom:6px'>Date / period</div>" +
+      renderSeg("period", PERIOD_OPTS, f.period) +
+      "<div class='cdate" + (f.period === "custom" ? "" : " hidden") + "'>" +
+      "<input data-df='from' type='date' value='" + (f.periodFrom ? dateInputStr(f.periodFrom) : "") + "'>" +
+      "<input data-df='to' type='date' value='" + (f.periodTo ? dateInputStr(f.periodTo) : "") + "'>" +
+      "</div>" +
+      "</div>" +
+      "<div class='gcol'>" +
+      "<div class='sl' style='margin-bottom:6px'>Last N " + unit + "</div>" +
+      renderSeg("lastN", LASTN_OPTS, lnMode) +
+      "<div class='cdate" + (showCustom ? "" : " hidden") + "'>" +
+      "<input data-af='lastN' type='number' min='1' placeholder='e.g. 20' value='" + (showCustom && f.lastN != null ? f.lastN : "") + "'>" +
+      "</div>" +
+      "</div>" +
+      "</div>" +
+      // auto-scroll status
+      "<div class='asrow' data-asrow>" +
+      "<span class='spin'><svg viewBox='0 0 24 24' fill='none' stroke-linecap='round'><path d='M21 12a9 9 0 1 1-2.64-6.36'/></svg></span>" +
+      "<span class='astxt' data-astxt>Loading posts…</span>" +
+      "<button class='asstop' data-asstop>Stop</button>" +
+      "</div>" +
+      "</div>" +
+      // REFINE: filter the loaded pool.
+      "<div class='sec'>" +
+      "<div class='sl'>Refine</div>" +
+      renderRangeRow("Views", "Views", f.minViews, f.maxViews) +
+      renderRangeRow("Likes", "Likes", f.minLikes, f.maxLikes) +
+      renderRangeRow("Comments", "Comments", f.minComments, f.maxComments) +
+      "<div style='margin-top:10px'><div class='sl' style='margin-bottom:6px'>Paid partnership</div>" +
+      renderSeg("paid", PAID_OPTS, f.paid) +
+      "</div>" +
+      "</div>" +
+      "<div class='sec'>" +
+      renderChipGroup("collaborators", "Collaborators", facets.collaborators, f.collaborators) +
+      "</div>" +
+      "<div class='sec'>" +
+      renderChipGroup("hashtags", "Hashtags", facets.hashtags, f.hashtags) +
+      "</div>" +
+      "<div class='sec'>" +
+      renderChipGroup("tags", "Tagged accounts", facets.tags, f.tags) +
+      "</div>" +
+      "<div class='sec'>" +
+      renderChipGroup("locations", "Locations", facets.locations, f.locations) +
+      "</div>" +
+      "<div class='hint'>Load range pulls posts in (auto-scrolls). Refine then filters that pool live. All groups must match; within a group, any selected value matches.</div>" +
+      "</div>";
+    wireFilterPanel(f);
+  }
+
+  function dateInputStr(sec) {
+    if (!sec) return "";
+    var d = new Date(sec * 1000);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2);
+  }
+  function dateInputToSec(str) {
+    if (!str) return null;
+    var d = new Date(str + "T00:00:00");
+    return Number.isNaN(d.getTime()) ? null : Math.floor(d.getTime() / 1000);
+  }
+
+  function cloneFilters() {
+    var f = currentFilters();
+    var out = {};
+    for (var k in f) {
+      if (Object.prototype.hasOwnProperty.call(f, k)) out[k] = Array.isArray(f[k]) ? f[k].slice() : f[k];
+    }
+    return out;
+  }
+  function toggleInArray(arr, val) {
+    var i = arr.indexOf(val);
+    if (i === -1) arr.push(val); else arr.splice(i, 1);
+  }
+
+  function syncChipGroup(name) {
+    var selected = currentFilters()[name] || [];
+    var group = filterRoot.querySelector(".cg[data-fn='" + name + "']");
+    if (!group) return;
+    var list = group.querySelector(".clist[data-fn='" + name + "']");
+    if (!list) return;
+    // Update on/off classes, then move selected chips to the top.
+    var chips = [].slice.call(list.querySelectorAll(".chip"));
+    var sel = [], unsel = [];
+    chips.forEach(function (chip) {
+      var on = selected.indexOf(chip.dataset.v) !== -1;
+      chip.classList.toggle("on", on);
+      (on ? sel : unsel).push(chip);
+    });
+    sel.concat(unsel).forEach(function (chip) { list.appendChild(chip); });
+  }
+
+  function wireFilterPanel(f) {
+    // Number inputs inside shadow DOM are tricky: neither `input` nor `change`
+    // fires reliably across Chrome versions.  Use all three events together:
+    //   input  – fires on most keystrokes (debounced to avoid thrashing)
+    //   change – fires on blur / spinner clicks
+    //   keyup  – fires after each keystroke (backup for `input`)
+    // Whichever fires first updates the filters; a 200ms debounce on the
+    //高频 events keeps `setFilters` calls cheap.
+    function applyNum(input, apply) {
+      var timer = null;
+      function flush() {
+        if (timer) { clearTimeout(timer); timer = null; }
+        var raw = input.value.trim();
+        if (raw === "") { apply(null); return; }
+        var num = parseInt(raw, 10);
+        if (!Number.isFinite(num)) { input.value = ""; apply(null); return; }
+        apply(num);
+      }
+      function debounced() {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(flush, 200);
+      }
+      input.addEventListener("input", debounced);
+      input.addEventListener("keyup", debounced);
+      input.addEventListener("change", flush);
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); flush(); input.blur(); }
+      });
+    }
+    filterRoot.querySelectorAll(".fi[data-rk]").forEach(function (input) {
+      var key = input.dataset.rk, which = input.dataset.rv;
+      applyNum(input, function (num) {
+        var next = cloneFilters();
+        var k = (which === "min" ? "min" : "max") + key;
+        next[k] = num == null ? null : Math.max(0, num);
+        setFilters(next);
+      });
+    });
+    // Segmented controls (period, paid, lastN): toggle in-place, then apply.
+    filterRoot.querySelectorAll(".fseg").forEach(function (seg) {
+      var name = seg.dataset.fn;
+      seg.querySelectorAll("button").forEach(function (b) {
+        b.addEventListener("click", function () {
+          var next = cloneFilters();
+          if (name === "lastN") {
+            // "0" = all (null), "-1" = custom (show input, don't set yet), else preset.
+            if (b.dataset.v === "0") next.lastN = null;
+            else if (b.dataset.v === "-1") { /* custom: show input, keep current lastN */ }
+            else next.lastN = parseInt(b.dataset.v, 10);
+          } else {
+            next[name] = b.dataset.v;
+          }
+          seg.querySelectorAll("button").forEach(function (s) { s.classList.toggle("on", s === b); });
+          // Toggle custom-date visibility when period changes.
+          if (name === "period") {
+            var cd = filterRoot.querySelector(".cdate");
+            if (cd) cd.classList.toggle("hidden", b.dataset.v !== "custom");
+          }
+          // Toggle custom lastN input visibility.
+          if (name === "lastN") {
+            var cd2 = filterRoot.querySelectorAll(".cdate")[1];
+            if (cd2) cd2.classList.toggle("hidden", b.dataset.v !== "-1");
+            // If a preset was picked, apply immediately. If "custom", wait for input.
+            if (b.dataset.v !== "-1") setFilters(next);
+          } else {
+            setFilters(next);
+          }
+        });
+      });
+    });
+    // Custom date inputs
+    filterRoot.querySelectorAll(".cdate input[data-df]").forEach(function (input) {
+      input.addEventListener("change", function () {
+        var next = cloneFilters();
+        if (input.dataset.df === "from") next.periodFrom = dateInputToSec(input.value);
+        else next.periodTo = dateInputToSec(input.value);
+        setFilters(next);
+      });
+    });
+    // Custom lastN input (inside the second .cdate container)
+    var lastNInput = filterRoot.querySelector("[data-af='lastN']");
+    if (lastNInput) applyNum(lastNInput, function (num) {
+      var next = cloneFilters();
+      next.lastN = num == null ? null : Math.max(1, num);
+      setFilters(next);
+    });
+    // Clear all (full rebuild is fine - it's a click, not a focus-sensitive input)
+    var clearAll = filterRoot.querySelector("[data-act='clearall']");
+    if (clearAll) clearAll.addEventListener("click", clearFilters);
+    // Stop auto-scroll
+    var asStop = filterRoot.querySelector("[data-asstop]");
+    if (asStop) asStop.addEventListener("click", function () { stopAutoScroll(); });
+    // Chip groups: search, select-all, clear, individual toggles
+    ["collaborators", "hashtags", "tags", "locations"].forEach(function (name) {
+      var searchInput = filterRoot.querySelector("[data-sf='" + name + "']");
+      if (searchInput) searchInput.addEventListener("input", function () {
+        var q = searchInput.value.toLowerCase();
+        var list = filterRoot.querySelector(".clist[data-fn='" + name + "']");
+        if (!list) return;
+        list.querySelectorAll(".chip").forEach(function (chip) {
+          var match = !q || chip.textContent.toLowerCase().indexOf(q) !== -1;
+          chip.style.display = match ? "" : "none";
+        });
+      });
+      var group = filterRoot.querySelector(".cg[data-fn='" + name + "']");
+      if (!group) return;
+      group.querySelectorAll("button[data-act]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var facets = computeFacets()[name];
+          var next = cloneFilters();
+          if (btn.dataset.act === "all") {
+            var q = (searchInput && searchInput.value || "").toLowerCase();
+            next[name] = facets.filter(function (v) { return !q || v.indexOf(q) !== -1; });
+          } else {
+            next[name] = [];
+          }
+          setFilters(next);
+          syncChipGroup(name);
+        });
+      });
+      group.querySelectorAll(".chip").forEach(function (chip) {
+        chip.addEventListener("click", function () {
+          var v = chip.dataset.v;
+          var next = cloneFilters();
+          toggleInArray(next[name], v);
+          setFilters(next);
+          syncChipGroup(name); // re-applies on/off + floats selected to top
+        });
+      });
+    });
   }
 
   function setSort(by, dir) {
@@ -1539,6 +2350,50 @@
     toolbarRenderKey = "";
     withDomWrites(renderData); // instant overlay + toolbar; badges follow
     schedule("native");
+  }
+
+  // ---- facets (chip sources for the filter popover) --------------------
+  // Unique collaborators / hashtags / tagged users / locations across the
+  // route's loaded records, memoized by registry version so scrolling (which
+  // bumps the version) refreshes the chip set.
+  var facetCache = { version: -1, collaborators: [], hashtags: [], tags: [], locations: [] };
+  function computeFacets() {
+    if (facetCache.version === registryVersion) return facetCache;
+    var collab = {}, tags = {}, hash = {}, loc = {};
+    memberRecords().forEach(function (rec) {
+      (rec.collaborators || []).forEach(function (u) { collab[String(u).toLowerCase()] = true; });
+      (rec.taggedUsers || []).forEach(function (u) { tags[String(u).toLowerCase()] = true; });
+      (rec.hashtags || []).forEach(function (h) { hash[String(h).toLowerCase()] = true; });
+      if (rec.location) loc[String(rec.location).toLowerCase()] = true;
+    });
+    facetCache.collaborators = Object.keys(collab).sort();
+    facetCache.tags = Object.keys(tags).sort();
+    facetCache.hashtags = Object.keys(hash).sort();
+    facetCache.locations = Object.keys(loc).sort();
+    facetCache.version = registryVersion;
+    return facetCache;
+  }
+
+  function setFilters(next, opts) {
+    var prev = currentFilters();
+    options.instagram.filters = next;
+    bumpFilters();
+    filtersBumpedLocally = true;
+    snapshotRecords(true);
+    chrome.runtime.sendMessage({ type: "afw:options:set", options: options });
+    withDomWrites(renderData);
+    syncToolbarState();
+    // Kick the load-scroll only when the load-range filters actually changed.
+    var loadRangeChanged = prev.period !== next.period || prev.periodFrom !== next.periodFrom
+      || prev.periodTo !== next.periodTo || prev.lastN !== next.lastN;
+    if (loadRangeChanged) maybeStartLoadScroll();
+    else updateLoadStatus();
+    schedule("native");
+  }
+  function clearFilters() {
+    stopAutoScroll();
+    setFilters(defaultFilters());
+    if (filterRoot) renderFilterPanel();
   }
 
   function disableSortingView() {
@@ -1724,9 +2579,19 @@
   function boot() {
     if (window.AFW && window.AFW.injectStyles) window.AFW.injectStyles(document);
     mo.observe(document.body, { childList: true, subtree: true });
-    // react to option/license changes made in the popup
+    // react to option/license changes made in the popup or another tab.
+    // setFilters already bumps locally before the storage round-trip, so we
+    // only bump here when the change came from elsewhere (popup/other tab).
     chrome.storage.onChanged.addListener(function (changes) {
-      if (changes.options) options = changes.options.newValue;
+      if (changes.options) {
+        var prevFilters = options && options.instagram && options.instagram.filters;
+        var nextFilters = changes.options.newValue && changes.options.newValue.instagram && changes.options.newValue.instagram.filters;
+        options = changes.options.newValue;
+        if (!filtersBumpedLocally && JSON.stringify(prevFilters || {}) !== JSON.stringify(nextFilters || {})) {
+          bumpFilters();
+        }
+        filtersBumpedLocally = false;
+      }
       if (changes.license) license = changes.license.newValue;
       schedule("both");
     });
@@ -1736,19 +2601,23 @@
     ]).then(function (res) {
       options = res[0]; license = res[1] || { pro: false };
       log("engine ready. IG active:", igOn());
+      loadCachedSurface(activeSurface); // warm the registry on first load
       schedule("both");
     });
     // SPA nav watch: page.js sends "nav" instantly; this poll is the fallback.
     var lastHref = location.href;
     setInterval(function () { if (location.href !== lastHref) { lastHref = location.href; schedule("both"); } }, 1000);
-    window.addEventListener("resize", function () { refreshControlOffsets(); }, { passive: true });
+    window.addEventListener("resize", function () { refreshControlOffsets(); clampToolbarPos(); }, { passive: true });
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden && hiddenPending) { hiddenPending = false; schedule("both"); }
     });
-    // Escape closes the sorted view, unless an IG dialog is open above it.
+    // Escape closes the filter popover first, then the sorted view, unless an
+    // IG dialog is open above both.
     document.addEventListener("keydown", function (e) {
-      if (e.key !== "Escape" || !sv.open) return;
+      if (e.key !== "Escape") return;
       if (document.querySelector('[role="dialog"]')) return;
+      if (filterHost && filterHost.style.display !== "none") { closeFilterPanel(); return; }
+      if (!sv.open) return;
       withDomWrites(function () { destroySortedView(true); });
       renderToolbar();
     });

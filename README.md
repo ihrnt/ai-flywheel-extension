@@ -7,6 +7,8 @@ AI Flywheel turns Instagram's endless, unordered feeds into a ranked view you co
 ## Features
 
 - Sorted view for profile grids, Reels tabs, and Explore. Rank by views, likes, comments, or date, in either direction.
+- Filter by metric ranges, date period, paid partnership, collaborators, hashtags, tagged accounts, and location. Combine filters with any sort.
+- Draggable toolbar. Reposition the floating toolbar anywhere on screen so it never blocks the host page's controls.
 - Engagement badges on every post and reel, with breakout markers that flag content performing well above a creator's baseline.
 - Reel player controls. Play, pause, and scrub any reel with a real timeline.
 - Profile insight cards. Account type, category, location, join date, verification, and username history, shown above the bio.
@@ -30,12 +32,14 @@ Sorting and the toolbar activate once Pro is on (see below). Then:
 - Open any Instagram profile, its Reels tab, or the Explore page.
 - Click the grid icon in the floating toolbar to open the sorted view.
 - Pick a metric (Views, Likes, Comments, or Recent) and a direction.
+- Click the filter icon to narrow by metric ranges, date period, paid partnership, collaborators, hashtags, tagged accounts, or location. Chip lists show what's actually in the feed; use Show all or search to pick fast.
+- Drag the toolbar by its grip handle to move it out of the way.
 - Keep scrolling to load more posts, then re-rank to fold the new ones into the order.
 - Use the download menu on any tile, or the CSV button to export the whole grid.
 
 ## Pro
 
-Sorting, badges, downloads, and reel controls are part of AI Flywheel Pro.
+Sorting, filtering, badges, downloads, and reel controls are part of AI Flywheel Pro.
 
 - Buy a plan from the extension popup: monthly, yearly, or lifetime.
 - Enter the license key you receive by email to activate.

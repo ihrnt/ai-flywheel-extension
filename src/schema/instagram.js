@@ -70,6 +70,30 @@
     return null;
   }
 
+  function usernamesFrom(list) {
+    var out = [];
+    if (!Array.isArray(list)) return out;
+    for (var i = 0; i < list.length; i++) {
+      var u = list[i] && list[i].username;
+      if (u) out.push(String(u));
+    }
+    return out;
+  }
+
+  var HASHTAG_RE = /#[\w\u00C0-\u024F]+/g;
+  function extractHashtags(text) {
+    if (!text || typeof text !== "string") return [];
+    var matches = text.match(HASHTAG_RE);
+    if (!matches) return [];
+    var seen = Object.create(null);
+    var out = [];
+    for (var i = 0; i < matches.length; i++) {
+      var tag = matches[i].slice(1).toLowerCase();
+      if (!seen[tag]) { seen[tag] = true; out.push(tag); }
+    }
+    return out;
+  }
+
   // Every downloadable asset on a media: cover/image, video, and each carousel
   // slide. Grid reels carry only the cover here; the video url arrives via /info/.
   function assetsFrom(media) {
@@ -95,8 +119,13 @@
     var pk = media.pk != null ? String(media.pk) : null;
     if (!pk) return null;
     var caption = media.caption && typeof media.caption === "object" ? media.caption : null;
+    var captionText = caption ? caption.text || null : null;
     var isVideo = media.media_type === 2;
     var code = media.code || media.shortcode || null;
+    var usertags = media.usertags && Array.isArray(media.usertags.in) ? media.usertags.in : null;
+    var taggedUsers = usertags
+      ? usernamesFrom(usertags.map(function (t) { return t && t.user; }))
+      : [];
     return {
       pk: pk,
       code: code,
@@ -106,11 +135,16 @@
       comments: numOrNull(media.comment_count),
       plays: firstNum(media.play_count, media.ig_play_count, media.view_count),
       takenAt: firstNum(media.taken_at, media.taken_at_timestamp, media.created_at),
-      caption: caption ? caption.text || null : null,
+      caption: captionText,
       username: media.user && media.user.username ? media.user.username : null,
       thumbUrl: bestImage(media),
       videoUrl: bestVideo(media),
       assets: assetsFrom(media),
+      paidPartnership: media.is_paid_partnership === true,
+      collaborators: usernamesFrom(media.coauthor_producers),
+      taggedUsers: taggedUsers,
+      location: media.location && media.location.name ? media.location.name : null,
+      hashtags: extractHashtags(captionText),
       url: code
         ? "https://www.instagram.com/" + (isVideo ? "reel" : "p") + "/" + code + "/"
         : null
@@ -246,7 +280,9 @@
     parseResponse: parseResponse,
     parseInfo: parseInfo,
     parseProfile: parseProfile,
-    compareRecords: compareRecords
+    compareRecords: compareRecords,
+    extractHashtags: extractHashtags,
+    usernamesFrom: usernamesFrom
   };
 
   root.AFW = root.AFW || {};

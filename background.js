@@ -9,7 +9,27 @@ const CHECKOUT_LINKS = {
 };
 const CHECKOUT_PLANS = new Set(Object.keys(CHECKOUT_LINKS));
 const LICENSE_RETRY_MS = 15 * 60 * 1000;
-const OPTIONS_VERSION = 2;
+const OPTIONS_VERSION = 3;
+
+function defaultFilters() {
+  return {
+    minViews: null,
+    maxViews: null,
+    minLikes: null,
+    maxLikes: null,
+    minComments: null,
+    maxComments: null,
+    paid: "any",
+    period: "all",
+    periodFrom: null,
+    periodTo: null,
+    lastN: null,
+    collaborators: [],
+    hashtags: [],
+    tags: [],
+    locations: []
+  };
+}
 
 const DEFAULT_OPTIONS = {
   tiktok: {
@@ -28,7 +48,8 @@ const DEFAULT_OPTIONS = {
     badges: true,
     downloads: true,
     toolbar: true,
-    videoControls: true
+    videoControls: true,
+    filters: defaultFilters()
   }
 };
 
@@ -98,9 +119,17 @@ async function saveLicense(license, { licenseKey = "", clearKey = false } = {}) 
 }
 
 function mergeOptions(options) {
+  var ig = options && options.instagram ? options.instagram : {};
+  var storedFilters = ig.filters || {};
+  var mergedFilters = { ...defaultFilters() };
+  for (var k in storedFilters) {
+    if (Object.prototype.hasOwnProperty.call(storedFilters, k)) {
+      mergedFilters[k] = Array.isArray(storedFilters[k]) ? storedFilters[k].slice() : storedFilters[k];
+    }
+  }
   return {
-    tiktok: { ...DEFAULT_OPTIONS.tiktok, ...(options?.tiktok || {}) },
-    instagram: { ...DEFAULT_OPTIONS.instagram, ...(options?.instagram || {}) },
+    tiktok: { ...DEFAULT_OPTIONS.tiktok, ...(options && options.tiktok ? options.tiktok : {}) },
+    instagram: { ...DEFAULT_OPTIONS.instagram, ...ig, filters: mergedFilters },
   };
 }
 
