@@ -269,6 +269,10 @@
     destroySortedView(false);
     sv.closedByUser = false; // closing is per-surface, not forever
     clearBadges();
+    // Navigating away ends the previous surface's load — don't keep paginating a
+    // profile the user has left. A later render refreshes the toolbar state.
+    stopScrollEngine();
+    stopApiFeed();
     activeSurface = next;
     activeStore = newRouteStore();
     toolbarRenderKey = "";
@@ -308,6 +312,7 @@
     calendar: "<rect x='3' y='4' width='18' height='18' rx='2'/><line x1='16' y1='2' x2='16' y2='6'/><line x1='8' y1='2' x2='8' y2='6'/><line x1='3' y1='10' x2='21' y2='10'/>",
     download: "<path d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/><polyline points='7 10 12 15 17 10'/><line x1='12' y1='15' x2='12' y2='3'/>",
     csv: "<path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/><polyline points='14 2 14 8 20 8'/><line x1='8' y1='13' x2='16' y2='13'/><line x1='8' y1='17' x2='16' y2='17'/>",
+    media: "<rect x='3' y='3' width='18' height='18' rx='2'/><polygon points='10 8 16 12 10 16 10 8'/>",
     account: "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M7 15l3-3 2 2 3-4 2 5'/><path d='M8 8h.01M16 8h.01'/><path d='M9 20l3-3 3 3'/>",
     sortDesc: "<line x1='4' y1='6' x2='12' y2='6'/><line x1='4' y1='12' x2='10' y2='12'/><line x1='4' y1='18' x2='8' y2='18'/><line x1='17' y1='5' x2='17' y2='19'/><polyline points='14 16 17 19 20 16'/>",
     sortAsc: "<line x1='4' y1='6' x2='8' y2='6'/><line x1='4' y1='12' x2='10' y2='12'/><line x1='4' y1='18' x2='12' y2='18'/><line x1='17' y1='19' x2='17' y2='5'/><polyline points='14 8 17 5 20 8'/>",
@@ -487,8 +492,8 @@
     }
     if (changed) {
       registryVersion++;
-      // Stop the load-scroll as soon as the target is reached; refresh progress.
-      if (scrollTimer && loadTarget) {
+      // Stop the load as soon as the target is reached; refresh progress.
+      if (loadingActive() && loadTarget) {
         if (loadTargetMet()) stopAutoScroll();
         else updateLoadStatus();
       }
@@ -550,6 +555,8 @@
         profileCache.put(handle, profile, cached.updatedAt);
       }
     }
+    // A hybrid load was waiting on this profile's numeric id — start it now.
+    if (apiFeed.pending && activeProfileId()) startApiFeed();
     if (changed) schedule();
   }
 
@@ -1451,49 +1458,35 @@
     else { pendingActions.delete(pk); if (pendingTimers.has(pk)) { clearTimeout(pendingTimers.get(pk)); pendingTimers.delete(pk); } }
   }
 
-  function originalAssetName(url, ext) {
-    var name = "";
-    try {
-      name = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
-    } catch (e) {}
-    name = safeFilePart(name, (ext === "mp4" ? "video" : "image") + "." + ext);
-    if (!/\.[a-z0-9]{2,5}$/i.test(name)) name += "." + ext;
-    return name;
-  }
-  function assetSequence(asset, rec) {
-    var m = String(asset.label || "").match(/(\d+)/);
-    var idx = m ? +m[1] : Math.max(1, (rec.assets || []).indexOf(asset) + 1);
-    return ("0" + idx).slice(-2);
-  }
-  function mediaFileName(rec, asset, folder) {
+  // Media files land in {handle}/{postId}/ with a slide/reel leaf name:
+  //   single video reel   -> reel.mp4          single video cover -> cover.jpg
+  //   lone photo          -> image.jpg
+  //   carousel slide N    -> slide N.mp4 / slide N.jpg  (both kept per slide)
+  // The carousel index comes from the asset label ("Video 3" / "Image 3"),
+  // which schema/instagram.js sets from the true slide order.
+  function mediaLeafName(asset) {
     var ext = asset.type === "video" ? "mp4" : "jpg";
-    var kind = asset.type === "video" ? "Video" : "Image";
-    var prefix = [
-      channelHandle(rec),
-      rec.code || rec.pk || "Post",
-      kind,
-      assetSequence(asset, rec)
-    ].map(function (part) { return safeFilePart(part, ""); }).filter(Boolean).join(" ");
-    var name = safeFilePart(prefix + " " + originalAssetName(asset.url, ext), kind + "." + ext);
-    return folder ? safeFilePart(folder, "Instagram") + "/" + name : name;
+    var m = String(asset.label || "").match(/(\d+)/);
+    if (m) return "slide " + (+m[1]) + "." + ext;         // carousel slide
+    if (asset.type === "video") return "reel." + ext;      // single video/reel
+    if (/cover/i.test(asset.label || "")) return "cover." + ext;
+    return "image." + ext;                                 // lone photo
   }
-  function bulkFolderName(rec) {
-    return [
-      channelHandle(rec),
-      rec.code || rec.pk || "Post"
-    ].map(function (part) { return safeFilePart(part, ""); }).filter(Boolean).join(" ");
+  function mediaFileName(rec, asset) {
+    var handle = safeFilePart(channelHandle(rec), "instagram");
+    var postId = safeFilePart(rec.code || rec.pk || "post", "post");
+    return handle + "/" + postId + "/" + mediaLeafName(asset);
   }
-  function downloadAsset(rec, asset, folder) {
+  function downloadAsset(rec, asset) {
     if (!asset || !asset.url) return;
-    var name = mediaFileName(rec, asset, folder);
+    var name = mediaFileName(rec, asset);
     chrome.runtime.sendMessage({ type: "afw:download", url: asset.url, filename: name, saveAs: false, conflictAction: "uniquify" }, function (res) {
       if (chrome.runtime.lastError) log("download failed:", chrome.runtime.lastError.message);
     });
   }
-  function downloadAssets(rec, assets, kind) {
-    var folder = bulkFolderName(rec);
+  function downloadAssets(rec, assets) {
     (assets || []).forEach(function (asset, i) {
-      setTimeout(function () { downloadAsset(rec, asset, folder); }, i * 150);
+      setTimeout(function () { downloadAsset(rec, asset); }, i * 150);
     });
   }
   function copyCaption(text) {
@@ -1552,7 +1545,7 @@
       btn.addEventListener("click", function (e) {
         e.stopPropagation();
         var it = items[+btn.dataset.i];
-        if (it.kind === "images-all" || it.kind === "videos-all") { downloadAssets(rec, it.assets, it.folderKind); closeMenu(); }
+        if (it.kind === "images-all" || it.kind === "videos-all") { downloadAssets(rec, it.assets); closeMenu(); }
         else if (it.kind === "image" || it.kind === "video") downloadAsset(rec, it.asset);
         else if (it.kind === "video-fetch") { var s = btn.querySelector("span"); s.textContent = "Fetching video…"; addPending(rec.pk, "video", function (v) { downloadAsset(rec, v); }); }
         else if (it.kind === "caption") { copyCaption(rec.caption); btn.querySelector("span").textContent = "Copied"; btn.classList.add("ok"); }
@@ -1579,32 +1572,108 @@
   var toolbarRenderKey = "";
   var scrollTimer = null;
   var scrollSpeed = 7;
+  // Hybrid loader. A gentle direct-API pull (the loop lives in page.js) does the
+  // heavy lifting at a slow, jittered cadence so the signed-in account never
+  // looks like a scraper; a fast, human-like scroll runs alongside it for
+  // organic cover and to grab whatever Instagram renders on its own. Both feed
+  // the one registry and dedupe by pk, so overlap is free and either engine can
+  // retire without the other. API = correctness + speed; scroll = camouflage +
+  // bonus coverage.
+  var API_FEED_MIN_MS = 700;   // floor between API pages (jittered up to MAX)
+  var API_FEED_MAX_MS = 1500;
+  var API_FEED_MAX_PAGES = 60; // ~6k records default; raised to fit a lastN target
+  var apiFeed = { active: false, pending: false, surface: null, reason: null };
 
-  function stopAutoScroll() {
-    if (scrollTimer) {
-      clearInterval(scrollTimer);
-      scrollTimer = null;
-      renderToolbar();
-      updateLoadStatus();
+  function loadingActive() { return !!scrollTimer || apiFeed.active; }
+
+  // ---- direct-API engine (loop delegated to page.js) --------------------
+  function feedSurfaceKind() {
+    if (activeSurface.kind === "profile-reels") return "reels";
+    if (activeSurface.kind === "profile-posts") return "posts";
+    return null; // explore / reels-feed / home: no single target user -> scroll only
+  }
+  function activeProfileId() {
+    var handle = normalHandle(activeSurface.handle || profileHandle());
+    var p = handle && profiles.get(handle);
+    return p && p.id ? String(p.id) : null;
+  }
+  function apiFeedMaxPages() {
+    if (loadTarget && loadTarget.kind === "lastN" && loadTarget.n > 0) {
+      return Math.max(1, Math.min(1000, Math.ceil(loadTarget.n / 100) + 2));
     }
+    return API_FEED_MAX_PAGES;
+  }
+  function startApiFeed() {
+    if (apiFeed.active) return;
+    var surface = feedSurfaceKind();
+    if (!surface) return; // unsupported surface -> scroll carries the load alone
+    var userId = activeProfileId();
+    if (!userId) {
+      // Profile id not captured yet; request it and retry once it lands.
+      apiFeed.pending = true;
+      requestProfile(activeSurface.handle || profileHandle());
+      return;
+    }
+    apiFeed.pending = false;
+    apiFeed.active = true;
+    apiFeed.surface = surface;
+    apiFeed.reason = null;
+    sendToPage("feed:start", {
+      userId: userId,
+      surface: surface,
+      minDelay: API_FEED_MIN_MS,
+      maxDelay: API_FEED_MAX_MS,
+      maxPages: apiFeedMaxPages()
+    });
+  }
+  function stopApiFeed() {
+    apiFeed.pending = false;
+    if (!apiFeed.active) return;
+    apiFeed.active = false;
+    sendToPage("feed:stop", {});
+  }
+
+  // ---- scroll engine (organic cover + bonus coverage) -------------------
+  function stopScrollEngine() {
+    if (scrollTimer) { clearInterval(scrollTimer); scrollTimer = null; }
+  }
+  function stopAutoScroll() {
+    var was = loadingActive();
+    stopScrollEngine();
+    stopApiFeed();
+    if (was) { renderToolbar(); updateLoadStatus(); }
   }
   function startScroll() {
     if (scrollTimer) return;
-    var stuck = 0, lastY = -1;
+    var stuck = 0, lastH = -1;
     scrollTimer = setInterval(function () {
       var doc = document.scrollingElement || document.documentElement;
       var atBottom = window.scrollY + window.innerHeight >= doc.scrollHeight - 2;
-      if (atBottom || window.scrollY === lastY) stuck++;
-      else stuck = 0;
-      lastY = window.scrollY;
-      if (stuck >= 50) { stopAutoScroll(); return; }
-      window.scrollBy({ top: scrollSpeed, behavior: "auto" });
-    }, 33);
+      // Jump ~1 viewport toward the bottom each tick (scaled by the speed slider)
+      // so Instagram's own virtualizer fetches the next page at its natural max
+      // rate — far quicker than nudging a few pixels, and it reads as a person
+      // scrolling hard. When the page stops growing at the bottom, the API (if
+      // running) is carrying the load, so we retire only the scroll, not both.
+      var step = Math.max(240, Math.round(window.innerHeight * (0.5 + scrollSpeed / 24)));
+      if (doc.scrollHeight === lastH && atBottom) stuck++; else stuck = 0;
+      lastH = doc.scrollHeight;
+      if (stuck >= 40) { // ~12s with no new native content
+        stopScrollEngine();
+        renderToolbar();
+        updateLoadStatus();
+        return;
+      }
+      window.scrollBy({ top: step, behavior: "auto" });
+    }, 300);
     renderToolbar();
   }
+  function startHybridLoad() {
+    startApiFeed();  // gentle, fast, complete
+    startScroll();   // organic cover + whatever IG renders for free
+  }
   function toggleAutoScroll() {
-    if (scrollTimer) { stopAutoScroll(); return; }
-    startScroll();
+    if (loadingActive()) { stopAutoScroll(); return; }
+    startHybridLoad();
   }
 
   // ---- load-to-target ---------------------------------------------------
@@ -1638,20 +1707,21 @@
     loadTarget = computeLoadTarget();
     if (!loadTarget) { stopAutoScroll(); updateLoadStatus(); return; }
     if (loadTargetMet()) { stopAutoScroll(); updateLoadStatus(); return; }
-    startScroll();
+    startHybridLoad();
     updateLoadStatus();
   }
   function loadStatusText() {
     var loaded = activeStore.memberPks.size;
     if (!loadTarget) return "";
-    if (loadTarget.kind === "lastN") return "Loading posts… " + Math.min(loaded, loadTarget.n) + " / " + loadTarget.n;
-    return "Loading posts from the selected period… " + loaded + " loaded";
+    var slow = apiFeed.reason === "rate_limited" ? " · Instagram is throttling; easing off" : "";
+    if (loadTarget.kind === "lastN") return "Loading… " + Math.min(loaded, loadTarget.n) + " / " + loadTarget.n + slow;
+    return "Loading from the selected period… " + loaded + " loaded" + slow;
   }
   function updateLoadStatus() {
     if (!filterRoot) return;
     var row = filterRoot.querySelector("[data-asrow]");
     if (!row) return;
-    var active = !!scrollTimer && !!loadTarget && !loadTargetMet();
+    var active = loadingActive() && !!loadTarget && !loadTargetMet();
     row.classList.toggle("show", active);
     var txt = filterRoot.querySelector("[data-astxt]");
     if (txt) txt.textContent = loadStatusText();
@@ -1711,6 +1781,42 @@
       setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
       if (chrome.runtime.lastError) log("csv download failed:", chrome.runtime.lastError.message);
     });
+  }
+
+  // Bulk media download for the whole filtered set (same records the CSV uses).
+  // Records are processed one at a time on a gentle cadence so the many /info/
+  // fetches for grid reels (which arrive with only a cover) don't look like a
+  // scrape; per-record assets are staggered by downloadAssets itself.
+  var bulkMedia = { active: false, done: 0, total: 0 };
+  function setMediaBtnState() {
+    if (!toolbarRoot) return;
+    var btn = toolbarRoot.querySelector("[data-a='media']");
+    if (!btn) return;
+    btn.classList.toggle("on", bulkMedia.active);
+    btn.title = bulkMedia.active
+      ? "Downloading media… " + bulkMedia.done + " / " + bulkMedia.total
+      : "Download all media for the filtered posts";
+  }
+  function downloadFilteredMedia() {
+    if (bulkMedia.active) return;
+    var records = recordsForExport();
+    if (!records.length) return;
+    bulkMedia = { active: true, done: 0, total: records.length };
+    setMediaBtnState();
+    var i = 0;
+    (function next() {
+      if (i >= records.length) { bulkMedia.active = false; setMediaBtnState(); return; }
+      var rec = records[i++];
+      var assets = (rec.assets || []).slice();
+      downloadAssets(rec, assets);
+      // Grid reels arrive with only a cover; fetch the video, then download it.
+      if (rec.kind === "video" && !assets.some(function (a) { return a.type === "video"; })) {
+        addPending(rec.pk, "video", function (v) { downloadAsset(rec, v); });
+      }
+      bulkMedia.done = i;
+      setMediaBtnState();
+      setTimeout(next, 500);
+    })();
   }
 
   function buildToolbar() {
@@ -1799,8 +1905,9 @@
     }
     var scrollBtn = toolbarRoot.querySelector("[data-a='scroll']");
     if (scrollBtn) {
-      scrollBtn.classList.toggle("on", !!scrollTimer);
-      scrollBtn.title = scrollTimer ? "Stop scroll" : "Start scroll";
+      var loading = loadingActive();
+      scrollBtn.classList.toggle("on", loading);
+      scrollBtn.title = loading ? "Stop loading" : "Load all (fast)";
     }
     var filterBtn = toolbarRoot.querySelector("[data-a='filter']");
     if (filterBtn) {
@@ -1814,6 +1921,7 @@
     }
     var cnt = toolbarRoot.querySelector(".cnt");
     if (cnt && cnt.textContent !== countLabel) cnt.textContent = countLabel;
+    setMediaBtnState();
   }
 
   function renderToolbar() {
@@ -1870,6 +1978,7 @@
       "<button class='ib' data-a='scroll'><svg viewBox='0 0 24 24'>" + svg(ICONS.scroll).replace(/^<svg[^>]*>|<\/svg>$/g, "") + "</svg></button>" +
       "<button class='ib' data-a='top' title='Back to top'><svg viewBox='0 0 24 24'>" + svg(ICONS.top).replace(/^<svg[^>]*>|<\/svg>$/g, "") + "</svg></button>" +
       "<button class='ib' data-a='csv' title='Download CSV'><svg viewBox='0 0 24 24'>" + svg(ICONS.csv).replace(/^<svg[^>]*>|<\/svg>$/g, "") + "</svg></button>" +
+      "<button class='ib' data-a='media' title='Download all media for the filtered posts'><svg viewBox='0 0 24 24'>" + svg(ICONS.media).replace(/^<svg[^>]*>|<\/svg>$/g, "") + "</svg></button>" +
       "<span class='div'></span>" +
       "<span class='cnt'></span>" +
       "</div>";
@@ -1899,6 +2008,7 @@
     toolbarRoot.querySelector("[data-a='scroll']").addEventListener("click", toggleAutoScroll);
     toolbarRoot.querySelector("[data-a='top']").addEventListener("click", function () { window.scrollTo({ top: 0, behavior: "smooth" }); });
     toolbarRoot.querySelector("[data-a='csv']").addEventListener("click", downloadCsv);
+    toolbarRoot.querySelector("[data-a='media']").addEventListener("click", downloadFilteredMedia);
     var speed = toolbarRoot.querySelector("[data-a='speed']");
     speed.addEventListener("input", function () {
       scrollSpeed = +speed.value;
@@ -1937,13 +2047,35 @@
     filterRoot = filterHost.attachShadow({ mode: "open" });
     document.body.appendChild(filterHost);
     document.addEventListener("click", function (e) {
-      if (filterHost.style.display !== "none" && !filterHost.contains(e.target)) {
-        var btn = toolbarRoot && toolbarRoot.querySelector("[data-a='filter']");
-        if (!btn || !btn.contains(e.target)) closeFilterPanel();
-      }
+      if (filterHost.style.display === "none" || filterHost.contains(e.target)) return;
+      // This runs in the capture phase, before the filter button's own click
+      // handler. The toolbar lives in a shadow root, so e.target is retargeted
+      // to the shadow host and btn.contains(e.target) can never see the real
+      // click node — the panel would close here and the button's toggle would
+      // immediately reopen it (looks like the close button does nothing).
+      // composedPath() includes shadow-internal nodes, so it can spot a click on
+      // the filter button; when it does, we bow out and let the toggle close it.
+      var path = e.composedPath ? e.composedPath() : [];
+      var btn = toolbarRoot && toolbarRoot.querySelector("[data-a='filter']");
+      if (btn && path.indexOf(btn) !== -1) return;
+      closeFilterPanel();
     }, true);
-    window.addEventListener("scroll", closeFilterPanel, true);
-    window.addEventListener("resize", closeFilterPanel, true);
+    // Dismiss on a genuine user scroll of the feed, but NOT when our own
+    // auto-loader is scrolling (setting a load range must leave the panel open
+    // so filtering can continue while posts stream in), nor when the scroll
+    // happens inside the panel's own scroll area.
+    window.addEventListener("scroll", function (e) {
+      if (loadingActive()) return;
+      if (filterHost && filterHost.contains(e.target)) return;
+      closeFilterPanel();
+    }, true);
+    // Same rule for resize: Instagram fires spurious resize events as media
+    // loads and the layout reflows, so ignore them while auto-loading - only a
+    // real viewport change (when idle) should dismiss the panel.
+    window.addEventListener("resize", function () {
+      if (loadingActive()) return;
+      closeFilterPanel();
+    }, true);
   }
   function closeFilterPanel() {
     if (filterHost) {
@@ -2041,6 +2173,22 @@
       ".btn2.lime:hover{background:#CDF57E}" +
       ".btn2.ghost{border-color:transparent;color:#A6A6AD}" +
       ".btn2.ghost:hover{color:#F4F4F5;background:rgba(255,255,255,.06)}" +
+      // preset row - the app's own chip vocabulary, no native <select>. The
+      // chip whose stored filters match the live filters lights lime, so the
+      // active preset is always visible and de-highlights the moment you tweak.
+      ".psec{padding:10px 12px 12px;border-top:1px solid rgba(255,255,255,.05)}" +
+      ".pshead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}" +
+      ".pchips{display:flex;flex-wrap:wrap;gap:4px}" +
+      ".pchip{display:inline-flex;align-items:stretch;height:26px;border:1px solid rgba(255,255,255,.10);border-radius:9999px;background:#141415;overflow:hidden}" +
+      ".pchip:hover{background:rgba(255,255,255,.06)}" +
+      ".pchip.on{background:#BEF264;border-color:#BEF264}" +
+      ".pchip-apply{display:inline-flex;align-items:center;padding:0 3px 0 11px;border:0;background:transparent;color:#A6A6AD;font:500 11px inherit;line-height:1;cursor:pointer;white-space:nowrap}" +
+      ".pchip:hover .pchip-apply{color:#F4F4F5}" +
+      ".pchip.on .pchip-apply{color:#0A0A0B;font-weight:600}" +
+      ".pchip-x{display:inline-flex;align-items:center;justify-content:center;width:20px;border:0;background:transparent;color:#6E6E76;font:400 14px inherit;line-height:1;cursor:pointer}" +
+      ".pchip-x:hover{color:#F4F4F5}" +
+      ".pchip.on .pchip-x{color:#0A0A0B}" +
+      ".pempty{font:400 11px inherit;color:#6E6E76}" +
       // hint footer
       ".hint{padding:8px 12px 10px;font:400 10.5px inherit;color:#6E6E76;line-height:1.4;border-top:1px solid rgba(255,255,255,.05)}" +
       // load-range 2-col grid
@@ -2065,6 +2213,24 @@
       "<input class='fi' data-rk='" + key + "' data-rv='min' type='number' min='0' placeholder='min' value='" + (min != null ? min : "") + "'>" +
       "<span class='fdash'>–</span>" +
       "<input class='fi' data-rk='" + key + "' data-rv='max' type='number' min='0' placeholder='max' value='" + (max != null ? max : "") + "'>" +
+      "</div>";
+  }
+  function renderPresetRow() {
+    var active = activePresetName();
+    var chips = filterPresets.map(function (p) {
+      var on = p.name === active;
+      return "<span class='pchip" + (on ? " on" : "") + "' data-preset='" + escAttr(p.name) + "'>" +
+        "<button class='pchip-apply' data-preset='" + escAttr(p.name) + "'>" + escAttr(p.name) + "</button>" +
+        "<button class='pchip-x' data-preset-del='" + escAttr(p.name) + "' title='Delete preset' aria-label='Delete preset " + escAttr(p.name) + "'>×</button>" +
+        "</span>";
+    }).join("");
+    var body = filterPresets.length
+      ? "<div class='pchips'>" + chips + "</div>"
+      : "<span class='pempty'>No saved presets yet - set filters, then Save current.</span>";
+    return "<div class='psec'>" +
+      "<div class='pshead'><span class='sl' style='margin-bottom:0'>Presets</span>" +
+      "<button class='btn2 ghost' data-preset-save title='Save the current filters as a preset'>Save current</button></div>" +
+      body +
       "</div>";
   }
   function renderSeg(name, opts, active) {
@@ -2114,6 +2280,8 @@
     filterRoot.innerHTML = filterCSS() +
       "<div class='fp'>" +
       "<div class='fh'><span class='fh-label'>Filters</span><button class='btn2 ghost' data-act='clearall'>Clear all</button></div>" +
+      // PRESETS: reuse a saved filter set across channels.
+      renderPresetRow() +
       // LOAD RANGE: how many posts to pull in, then refine below.
       "<div class='sec'>" +
       "<div class='sl'>Load range</div>" +
@@ -2299,6 +2467,18 @@
     // Clear all (full rebuild is fine - it's a click, not a focus-sensitive input)
     var clearAll = filterRoot.querySelector("[data-act='clearall']");
     if (clearAll) clearAll.addEventListener("click", clearFilters);
+    // Presets: apply a chip, delete via its ×, save the current filters.
+    var pSave = filterRoot.querySelector("[data-preset-save]");
+    if (pSave) pSave.addEventListener("click", function () {
+      var name = window.prompt("Save the current filters as a preset. Name:");
+      if (name && name.trim()) { saveCurrentPreset(name); renderFilterPanel(); }
+    });
+    filterRoot.querySelectorAll(".pchip-apply").forEach(function (btn) {
+      btn.addEventListener("click", function () { applyPreset(btn.dataset.preset); });
+    });
+    filterRoot.querySelectorAll("[data-preset-del]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) { e.stopPropagation(); deletePreset(btn.dataset.presetDel); });
+    });
     // Stop auto-scroll
     var asStop = filterRoot.querySelector("[data-asstop]");
     if (asStop) asStop.addEventListener("click", function () { stopAutoScroll(); });
@@ -2383,6 +2563,7 @@
     chrome.runtime.sendMessage({ type: "afw:options:set", options: options });
     withDomWrites(renderData);
     syncToolbarState();
+    syncPresetActive();
     // Kick the load-scroll only when the load-range filters actually changed.
     var loadRangeChanged = prev.period !== next.period || prev.periodFrom !== next.periodFrom
       || prev.periodTo !== next.periodTo || prev.lastN !== next.lastN;
@@ -2393,6 +2574,79 @@
   function clearFilters() {
     stopAutoScroll();
     setFilters(defaultFilters());
+    if (filterRoot) renderFilterPanel();
+  }
+
+  // ---- filter presets ---------------------------------------------------
+  // Saved under a dedicated chrome.storage.local key so they survive across
+  // channels. Only the universal (non-chip) filters are stored - collaborators/
+  // hashtags/tags/locations hold channel-specific values that never carry over,
+  // so applying a preset leaves the current channel's chip selections untouched.
+  var PRESET_KEYS = ["minViews", "maxViews", "minLikes", "maxLikes", "minComments", "maxComments", "paid", "period", "periodFrom", "periodTo", "lastN"];
+  var filterPresets = [];
+  function loadPresets(cb) {
+    chrome.storage.local.get("afwFilterPresets", function (res) {
+      filterPresets = Array.isArray(res.afwFilterPresets) ? res.afwFilterPresets : [];
+      if (cb) cb();
+    });
+  }
+  function persistPresets() {
+    chrome.storage.local.set({ afwFilterPresets: filterPresets });
+  }
+  function presetByName(name) {
+    for (var i = 0; i < filterPresets.length; i++) if (filterPresets[i].name === name) return filterPresets[i];
+    return null;
+  }
+  // The preset whose stored universal filters match the live filters, if any -
+  // drives which chip lights lime and de-highlights the instant you deviate.
+  function activePresetName() {
+    var f = currentFilters();
+    for (var i = 0; i < filterPresets.length; i++) {
+      var pf = filterPresets[i].filters || {};
+      var match = true;
+      for (var j = 0; j < PRESET_KEYS.length; j++) {
+        var k = PRESET_KEYS[j];
+        if ((f[k] == null ? null : f[k]) !== (pf[k] == null ? null : pf[k])) { match = false; break; }
+      }
+      if (match) return filterPresets[i].name;
+    }
+    return null;
+  }
+  function syncPresetActive() {
+    if (!filterRoot) return;
+    var active = activePresetName();
+    filterRoot.querySelectorAll(".pchip").forEach(function (chip) {
+      chip.classList.toggle("on", chip.dataset.preset === active);
+    });
+  }
+  function saveCurrentPreset(name) {
+    name = String(name || "").trim();
+    if (!name) return;
+    var f = currentFilters();
+    var snap = {};
+    PRESET_KEYS.forEach(function (k) { snap[k] = f[k]; });
+    var existing = presetByName(name);
+    if (existing) existing.filters = snap;
+    else filterPresets.push({ name: name, filters: snap });
+    persistPresets();
+  }
+  function applyPreset(name) {
+    var p = presetByName(name);
+    if (!p) return;
+    var cur = currentFilters();
+    var next = defaultFilters();
+    PRESET_KEYS.forEach(function (k) { next[k] = p.filters[k]; });
+    // Keep whatever chips are selected on this channel.
+    ["collaborators", "hashtags", "tags", "locations"].forEach(function (k) {
+      next[k] = (cur[k] || []).slice();
+    });
+    stopAutoScroll();
+    setFilters(next);
+    if (filterRoot) renderFilterPanel();
+  }
+  function deletePreset(name) {
+    filterPresets = filterPresets.filter(function (p) { return p.name !== name; });
+    persistPresets();
     if (filterRoot) renderFilterPanel();
   }
 
@@ -2568,6 +2822,15 @@
     if (msg.type === "records" && msg.data && msg.data.records) ingest(msg.data.records);
     if (msg.type === "profile" && msg.data && msg.data.profile) ingestProfile(msg.data.profile);
     if (msg.type === "nav") schedule("both");
+    if (msg.type === "feed:progress") updateLoadStatus();
+    if (msg.type === "feed:done") {
+      apiFeed.active = false;
+      apiFeed.reason = (msg.data && msg.data.reason) || null;
+      // Target reached -> retire both engines; otherwise just refresh the UI
+      // (scroll may still be finding content on its own).
+      if (loadTarget && loadTargetMet()) stopAutoScroll();
+      else { renderToolbar(); updateLoadStatus(); }
+    }
   });
 
   // observe DOM churn (new rows on scroll, React re-renders wiping our badges)
@@ -2604,6 +2867,7 @@
       loadCachedSurface(activeSurface); // warm the registry on first load
       schedule("both");
     });
+    loadPresets(); // filter presets for the filter panel dropdown
     // SPA nav watch: page.js sends "nav" instantly; this poll is the fallback.
     var lastHref = location.href;
     setInterval(function () { if (location.href !== lastHref) { lastHref = location.href; schedule("both"); } }, 1000);

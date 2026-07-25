@@ -397,6 +397,107 @@
     }
   }
 
+  // --- gentle direct-API feed pagination ---------------------------------
+  // Pull a profile's posts/reels straight from Instagram's own private feed
+  // endpoints (100 per request, following the max_id cursor) instead of waiting
+  // for the on-scroll virtualizer. Deliberately throttled with a jittered delay
+  // so the signed-in account stays far below any rate that would look like a
+  // scraper; the isolated world runs a human-like scroll alongside this for
+  // organic cover. Responses are parsed here and forwarded as normal records,
+  // so content.js ingests + dedupes them exactly like passively-observed pages.
+  let feedRun = 0; // bumped to cancel any in-flight loop (start = new id, stop = ++)
+  function csrfToken() {
+    const c = document.cookie.split(";").map((s) => s.trim()).find((s) => s.indexOf("csrftoken=") === 0);
+    return c ? c.slice("csrftoken=".length) : null;
+  }
+  function feedDelay(min, max) {
+    const lo = Math.max(200, +min || 700);
+    const hi = Math.max(lo, +max || 1500);
+    return lo + Math.floor(Math.random() * (hi - lo));
+  }
+  async function fetchFeedPage(surface, userId, cursor) {
+    if (surface === "reels") {
+      const token = csrfToken();
+      if (!token) throw new Error("no-csrf");
+      const opts = {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "x-ig-app-id": getAppId(),
+          "X-CSRFToken": token
+        },
+        body: new URLSearchParams({
+          target_user_id: String(userId),
+          max_id: cursor || "",
+          page_size: "100",
+          include_feed_video: "true"
+        }).toString(),
+        credentials: "include",
+        mode: "cors"
+      };
+      // Prefer the same-origin host (page.js runs in the page's www.instagram.com
+      // context, so this avoids a cross-origin/CORS block); fall back to the
+      // mobile host if the web route is absent. Either failure degrades to the
+      // fast scroll in the isolated world.
+      let res = await nativeFetch("https://www.instagram.com/api/v1/clips/user/", opts).catch(() => null);
+      if (!res || !res.ok) res = await nativeFetch("https://i.instagram.com/api/v1/clips/user/", opts).catch(() => null);
+      if (!res || !res.ok) throw new Error("http-" + (res ? res.status : "net"));
+      return res.json();
+    }
+    const url =
+      "https://www.instagram.com/api/v1/feed/user/" + encodeURIComponent(userId) +
+      "/?count=100" + (cursor ? "&max_id=" + encodeURIComponent(cursor) : "");
+    const res = await nativeFetch(url, {
+      method: "GET",
+      headers: { "x-ig-app-id": getAppId() },
+      credentials: "include",
+      mode: "cors"
+    });
+    if (!res.ok) throw new Error("http-" + res.status);
+    return res.json();
+  }
+  async function runFeed(opts) {
+    const schema = window.AFW && window.AFW.schema;
+    if (!schema || !schema.parseUserFeed) { send("feed:done", { reason: "no-schema" }); return; }
+    const surface = opts && opts.surface === "reels" ? "reels" : "posts";
+    const userId = opts && opts.userId;
+    if (!userId) { send("feed:done", { reason: "no-user" }); return; }
+    const maxPages = Math.max(1, Math.min(1000, (opts && +opts.maxPages) || 60));
+    const myRun = ++feedRun;
+    let cursor = (opts && opts.startCursor) || null;
+    let total = 0;
+    for (let pages = 0; feedRun === myRun && pages < maxPages; pages++) {
+      let json;
+      try {
+        json = await fetchFeedPage(surface, userId, cursor);
+      } catch (err) {
+        const message = String((err && err.message) || err);
+        const throttled = /http-(429|401|403)/.test(message) || message === "no-csrf";
+        send("feed:done", { reason: throttled ? "rate_limited" : "error", detail: message, total });
+        return;
+      }
+      if (feedRun !== myRun) return; // cancelled mid-flight
+      const parsed = schema.parseUserFeed(json, surface);
+      if (parsed && parsed.records.length) {
+        total += parsed.records.length;
+        send("records", {
+          platform: "instagram",
+          surface: surface,
+          records: parsed.records,
+          endCursor: parsed.nextMaxId
+        });
+      }
+      send("feed:progress", { total, pages: pages + 1, more: !!(parsed && parsed.moreAvailable) });
+      if (!parsed || !parsed.moreAvailable || !parsed.nextMaxId) {
+        send("feed:done", { reason: "exhausted", total });
+        return;
+      }
+      cursor = parsed.nextMaxId;
+      await new Promise((r) => setTimeout(r, feedDelay(opts && opts.minDelay, opts && opts.maxDelay)));
+    }
+    send("feed:done", { reason: feedRun === myRun ? "cap" : "cancelled", total });
+  }
+
   // --- messaging skeleton -------------------------------------------------
   document.addEventListener("afw:content", (e) => {
     let msg;
@@ -444,6 +545,12 @@
     }
     if (msg.type === "fetchAbout" && msg.data && msg.data.username) {
       triggerAboutAccount(msg.data.username);
+    }
+    if (msg.type === "feed:start" && msg.data) {
+      runFeed(msg.data);
+    }
+    if (msg.type === "feed:stop") {
+      feedRun++; // cancels the in-flight loop on its next iteration
     }
   });
 

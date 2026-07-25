@@ -73,12 +73,27 @@
     "@media(max-width:520px){.afw-badge{height:20px;padding:0 6px}.afw-badge .afw-n{font-size:11px!important}.afw-vc{left:8px;right:8px;height:36px;gap:8px}.afw-vc-time{font-size:11px}}"
   ].join("");
 
+  // The design system is built on Geist, but Instagram/TikTok never load it and
+  // the host CSP blocks a Google Fonts <link>, so the injected UI was silently
+  // falling back to system-ui - different vertical metrics, which reads as
+  // broken line-height against the Geist mockups. Bundle Geist and declare the
+  // @font-face at document level (Chrome ignores @font-face inside a shadow
+  // root, but shadow content still resolves fonts from the document), so every
+  // afw-* element AND the shadow-DOM toolbar/menu/filter panel render in Geist.
+  function fontFace() {
+    var url;
+    try { url = chrome.runtime.getURL("fonts/Geist-Variable.woff2"); } catch (e) { url = ""; }
+    if (!url) return "";
+    return "@font-face{font-family:'Geist';font-style:normal;font-weight:400 700;" +
+      "font-display:swap;src:url('" + url + "') format('woff2');}";
+  }
+
   function inject(doc) {
     doc = doc || document;
     if (doc.getElementById("afw-styles")) return;
     var style = doc.createElement("style");
     style.id = "afw-styles";
-    style.textContent = CSS;
+    style.textContent = fontFace() + CSS;
     (doc.head || doc.documentElement).appendChild(style);
   }
 

@@ -187,6 +187,28 @@
     return records.length ? { surface: "info", records: records, endCursor: null } : null;
   }
 
+  // Parse the private paginated user-feed endpoints we call directly (page.js):
+  //   GET  /api/v1/feed/user/<id>/   -> items are raw media objects
+  //   POST /api/v1/clips/user/       -> items are { media: {...} } wrappers
+  // Returns records tagged with the caller's surface plus the max_id cursor and
+  // more-available flag needed to page. Distinct from parseResponse, which reads
+  // the browser's GraphQL envelope (a different shape and a different cursor).
+  function parseUserFeed(json, surface) {
+    if (!json || !Array.isArray(json.items)) return null;
+    var records = [];
+    for (var i = 0; i < json.items.length; i++) {
+      var item = json.items[i];
+      var media = item && item.media && typeof item.media === "object" ? item.media : item;
+      var rec = readMedia(media, surface || "generic");
+      if (rec) records.push(rec);
+    }
+    var paging = json.paging_info || null;
+    var nextMaxId = (paging && paging.max_id) || json.next_max_id || null;
+    var moreFlag = paging ? paging.more_available : json.more_available;
+    var moreAvailable = !!moreFlag && !!nextMaxId;
+    return { surface: surface || "generic", records: records, nextMaxId: nextMaxId || null, moreAvailable: moreAvailable };
+  }
+
   function collectMedia(value, surface, records, seen, state) {
     if (!value || state.visits++ > state.maxVisits) return;
     if (Array.isArray(value)) {
@@ -279,6 +301,7 @@
     shortcodeToMediaId: shortcodeToMediaId,
     parseResponse: parseResponse,
     parseInfo: parseInfo,
+    parseUserFeed: parseUserFeed,
     parseProfile: parseProfile,
     compareRecords: compareRecords,
     extractHashtags: extractHashtags,
