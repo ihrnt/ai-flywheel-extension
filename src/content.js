@@ -1017,6 +1017,7 @@
     }
     tile.appendChild(link);
     tile.appendChild(buildOverlay(rec, rankIdx, breakoutX));
+    if (options.instagram.videoControls) ensureTilePlayer(tile, rec);
     return tile;
   }
 
@@ -1044,7 +1045,7 @@
     var needed = new Set();
     for (var i = first; i < last; i++) needed.add(sv.records[i].pk);
     sv.mounted.forEach(function (tile, pk) {
-      if (!needed.has(pk)) { tile.remove(); sv.mounted.delete(pk); }
+      if (!needed.has(pk)) { cleanupTilePlayer(tile); tile.remove(); sv.mounted.delete(pk); }
     });
     var info = rankInfo();
     for (var idx = first; idx < last; idx++) {
@@ -1075,6 +1076,10 @@
       // paced /info/ queue only for what is actually on screen.
       queueDateInfo(rec);
     }
+    // Lift the stats badges above each tile's scrubber bar right away - fresh
+    // tiles would otherwise wait for the next native render tick and flash the
+    // badges underneath the bar. Rect reads only, cheap on the scroll path.
+    sv.mounted.forEach(function (t) { updateControlOffset(t); });
   }
 
   function renderSortedView() {
@@ -1206,7 +1211,16 @@
     host.style.setProperty("--afw-stats-bottom", offset + "px");
   }
   function refreshControlOffsets() {
-    [].slice.call(document.querySelectorAll(".afw-tile")).forEach(updateControlOffset);
+    // Sweep bars whose tiles were removed wholesale (sorted-view teardown,
+    // virtualized windows) so liveBars never accumulates dead entries.
+    for (var s = liveBars.length - 1; s >= 0; s--) {
+      if (!liveBars[s].isConnected) {
+        var dead = liveBars[s].__afwVideo;
+        if (dead) cleanupVideoControl(dead);
+        else liveBars.splice(s, 1);
+      }
+    }
+    [].slice.call(document.querySelectorAll(".afw-tile,.afw-sv-tile")).forEach(updateControlOffset);
     for (var i = 0; i < liveBars.length; i++) updateBarInset(liveBars[i]);
   }
 
@@ -1228,9 +1242,58 @@
     }
     return null;
   }
+  // The reels player paints its caption/username cluster OVER the bottom of
+  // the video, in a sibling stacking context our z-index cannot beat - the bar
+  // renders underneath it and never receives clicks. Hit-test the bar's own
+  // midline with elementsFromPoint (no brittle IG class names): if a bounded
+  // native overlay covers it, lift the bar to sit just above that cluster.
+  // Explore/modal reels have the caption in a side column, hit-test clean, and
+  // keep the default bottom:10px.
+  function nativeBottomOverlayLift(bar, container) {
+    var br = bar.getBoundingClientRect();
+    var cr = container.getBoundingClientRect();
+    if (!br.width || !br.height) return 0;
+    // elementsFromPoint needs on-screen points; off-screen bars settle when scrolled into view
+    var y = br.top + br.height / 2;
+    if (y < 0 || y > window.innerHeight) return 0;
+    var minTop = null;
+    var fracs = [0.2, 0.5, 0.8];
+    for (var i = 0; i < fracs.length; i++) {
+      var x = br.left + br.width * fracs[i];
+      if (x < 0 || x > window.innerWidth) continue;
+      var stack = document.elementsFromPoint(x, y);
+      var top = stack && stack[0];
+      if (!top) continue;
+      // unobstructed when the topmost hit is us, the video, or a video wrapper
+      if (top === bar || bar.contains(top)) continue;
+      var video = bar.__afwVideo;
+      if (video && (top === video || top.contains(video))) continue;
+      if (isAfwNode(top)) continue;
+      // climb to the outermost bounded cluster still overlapping the bar band
+      var cluster = top, n = top;
+      while (n && n !== document.body && n !== container && !n.contains(container)) {
+        var r = n.getBoundingClientRect();
+        if (r.top < br.bottom && r.bottom > br.top && r.height < cr.height * 0.6) cluster = n;
+        n = n.parentElement;
+      }
+      var t = cluster.getBoundingClientRect().top;
+      // only treat it as a bottom overlay if it starts in the container's lower half
+      if (t < cr.top + cr.height * 0.5) continue;
+      if (minTop == null || t < minTop) minTop = t;
+    }
+    if (minTop == null) return 0;
+    var lift = Math.ceil(cr.bottom - minTop + 8);
+    // cap: never fly above 45% of the video
+    return Math.max(0, Math.min(lift, Math.round(cr.height * 0.45)));
+  }
   function updateBarInset(bar) {
     var container = bar.parentElement;
     if (!container) return;
+    // 1) vertical: measure at the natural position, then lift over IG's overlay
+    bar.style.removeProperty("--afw-vc-bottom");
+    var lift = nativeBottomOverlayLift(bar, container);
+    if (lift > 10) bar.style.setProperty("--afw-vc-bottom", lift + "px");
+    // 2) horizontal: keep clear of the mute button at the FINAL position
     var mute = nativeAudioRectOver(bar);
     if (!mute) { bar.style.removeProperty("--afw-vc-right"); return; }
     var cr = container.getBoundingClientRect();
@@ -1362,6 +1425,7 @@
       var old = host.querySelector(".afw-overlay");
       if (!t.rec) {
         if (old) old.remove();
+        cleanupTilePlayer(host);
         host.classList.remove("afw-tile");
         delete host.__afwOverlayKey;
         return;
@@ -1374,6 +1438,7 @@
         if (positionedHosts) positionedHosts.add(host);
       }
       host.classList.add("afw-tile");
+      if (options.instagram.videoControls) ensureTilePlayer(host, rec);
       var rankIdx = info.rankByPk.has(rec.pk) ? info.rankByPk.get(rec.pk) : null;
       var breakoutX = info.breakoutByPk.get(rec.pk) || "";
       var key = overlayKey(rec, s.by, rankIdx, breakoutX);
@@ -2687,6 +2752,107 @@
     liveBars.length = 0;
     refreshControlOffsets();
   }
+
+  // ---- in-tile player for grid thumbnails --------------------------------
+  // Explore's grid ships real autoplaying <video> elements, so the scrubber
+  // mounts there natively. The profile reels grid and the sorted view render
+  // plain thumbnails - so give video records their own lazy player: a poster
+  // <video> with no src plus the shared scrubber; the first play resolves the
+  // url (grid payloads lack it; addPending fetches /info/) and starts playback.
+  function resolveRecVideo(rec, cb) {
+    var v = (rec.assets || []).filter(function (a) { return a.type === "video"; })[0];
+    if (rec.videoUrl) return cb(rec.videoUrl);
+    if (v) return cb(v.url);
+    if (rec.pk) return addPending(rec.pk, "video", function (asset) { cb(asset.url); });
+    cb(null);
+  }
+  function ensureTilePlayer(host, rec) {
+    if (!host || !rec || rec.kind !== "video") return;
+    // A native IG video in this tile (explore grid, hover previews) means the
+    // normal scan owns it - and if we mounted a player earlier, retire ours.
+    var native = host.querySelector("video:not(.afw-tp-video)");
+    var ours = host.querySelector("video.afw-tp-video");
+    if (native) { if (ours) { cleanupVideoControl(ours); ours.remove(); } return; }
+    if (ours && ours.__afwVCBar && ours.__afwVCBar.isConnected) return;
+    if (ours) { cleanupVideoControl(ours); ours.remove(); }
+    if (getComputedStyle(host).position === "static") host.style.position = "relative";
+    var video = document.createElement("video");
+    video.className = "afw-tp-video";
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.preload = "none";
+    var poster = recordThumb(rec);
+    if (poster) video.poster = poster;
+    video.__afwVC = true;      // keep attachVideoControls' scan off it
+    video.__afwTile = true;
+    video.__afwSrcResolver = function (cb) { resolveRecVideo(rec, cb); };
+    video.addEventListener("play", function () {
+      video.classList.add("afw-tp-on");
+      // one tile playing at a time; never touch IG's own videos
+      liveBars.forEach(function (b) {
+        var other = b.__afwVideo;
+        if (other && other !== video && other.__afwTile && !other.paused) other.pause();
+      });
+    });
+    host.appendChild(video);
+    mountScrubber(video);
+  }
+  function cleanupTilePlayer(host) {
+    var ours = host && host.querySelector && host.querySelector("video.afw-tp-video");
+    if (ours) { cleanupVideoControl(ours); ours.remove(); }
+  }
+  // ---- geometric pointer router for the scrubber ------------------------
+  // Reels-player stacking traps the bar's z-index below IG's tap layer, so the
+  // bar's own listeners never fire there. This document-level CAPTURE router
+  // sees every pointer event before IG does and dispatches by geometry: a
+  // point inside a bar's play button or track is ours - handle it and stop the
+  // event so IG's tap-to-pause never sees it. Where the bar IS on top
+  // (explore/modal), e.target sits inside the bar and we defer to the direct
+  // listeners. The bar's other chrome stays click-through, as designed.
+  var vcRouterOn = false;
+  function pointIn(r, x, y) { return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
+  function barHitAt(x, y, skipTarget) {
+    for (var i = 0; i < liveBars.length; i++) {
+      var bar = liveBars[i];
+      if (!bar.isConnected || !bar.__afwHit) continue;
+      if (skipTarget && bar.contains(skipTarget)) return null; // direct path handles it
+      var h = bar.__afwHit;
+      if (pointIn(h.playBtn.getBoundingClientRect(), x, y)) return { h: h, part: "play" };
+      if (pointIn(h.track.getBoundingClientRect(), x, y)) return { h: h, part: "track" };
+    }
+    return null;
+  }
+  function ensureVcPointerRouter() {
+    if (vcRouterOn) return;
+    vcRouterOn = true;
+    document.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      var hit = barHitAt(e.clientX, e.clientY, e.target);
+      if (!hit) return;
+      if (hit.part === "play") { hit.h.toggle(e); }
+      else hit.h.onDown(e);
+    }, true);
+    document.addEventListener("pointermove", function (e) {
+      for (var i = 0; i < liveBars.length; i++) {
+        var h = liveBars[i].__afwHit;
+        if (h && h.isDragging()) { h.onMove(e); return; }
+      }
+    }, true);
+    document.addEventListener("pointerup", function (e) {
+      for (var i = 0; i < liveBars.length; i++) {
+        var h = liveBars[i].__afwHit;
+        if (h && h.isDragging()) { h.onUp(e); return; }
+      }
+    }, true);
+    // Swallow the compatibility click that follows a routed pointerdown, so
+    // IG's tap layer does not also toggle pause underneath our control.
+    document.addEventListener("click", function (e) {
+      var hit = barHitAt(e.clientX, e.clientY, e.target);
+      if (hit) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+  }
+
   function mountScrubber(video) {
     var container = video.parentElement;
     if (!container) return;
@@ -2695,8 +2861,11 @@
     var bar = el("div", "afw-vc");
     var playBtn = el("button", "afw-vc-play");
     var track = el("div", "afw-vc-track");
+    var rail = el("div", "afw-vc-rail");
     var fill = el("div", "afw-vc-fill");
-    track.appendChild(fill);
+    var knob = el("div", "afw-vc-knob");
+    rail.appendChild(fill); rail.appendChild(knob);
+    track.appendChild(rail);
     var time = el("span", "afw-vc-time");
     bar.appendChild(playBtn); bar.appendChild(track); bar.appendChild(time);
     bar.__afwVideo = video;
@@ -2717,7 +2886,9 @@
     }
     function upd() {
       var d = video.duration || 0, c = video.currentTime || 0;
-      fill.style.width = (d ? (c / d) * 100 : 0) + "%";
+      var pct = d ? (c / d) * 100 : 0;
+      fill.style.width = pct + "%";
+      knob.style.left = pct + "%";
       var label = tfmt(c) + " <span class='afw-tot'>/ " + tfmt(d) + "</span>";
       if (time.__afwLabel !== label) { time.__afwLabel = label; time.innerHTML = label; }
       icon();
@@ -2725,20 +2896,72 @@
     function toggle(e) {
       stop(e);
       if (video.paused) {
+        // Tile players start without a src; resolve it on first play (grid
+        // payloads lack the video url - addPending fetches /info/ on demand).
+        if (!video.currentSrc && !video.src && video.__afwSrcResolver) {
+          if (video.__afwResolving) return;
+          video.__afwResolving = true;
+          video.__afwSrcResolver(function (url) {
+            video.__afwResolving = false;
+            if (!url) return;
+            video.preload = "metadata";
+            video.src = url;
+            var pp = video.play();
+            if (pp && pp.catch) pp.catch(function () {});
+          });
+          return;
+        }
         var p = video.play();
         if (p && p.catch) p.catch(function () {});
       } else {
         video.pause();
       }
     }
-    function seek(e) {
+    // Map a client X onto the video timeline using the visible rail's width, so
+    // a click or drag anywhere in the tall track band seeks to that point.
+    function seekToX(x) {
+      var r = rail.getBoundingClientRect();
+      if (!video.duration || !r.width) return;
+      var frac = Math.min(1, Math.max(0, (x - r.left) / r.width));
+      video.currentTime = frac * video.duration;
+      upd();
+    }
+    var dragging = false;
+    function onDown(e) {
       stop(e);
-      var r = track.getBoundingClientRect();
-      if (video.duration) video.currentTime = ((e.clientX - r.left) / r.width) * video.duration;
+      dragging = true;
+      track.classList.add("afw-vc-drag");
+      if (track.setPointerCapture) { try { track.setPointerCapture(e.pointerId); } catch (err) {} }
+      seekToX(e.clientX);
+    }
+    function onMove(e) {
+      if (!dragging) return;
+      stop(e);
+      seekToX(e.clientX);
+    }
+    function onUp(e) {
+      if (!dragging) return;
+      stop(e);
+      dragging = false;
+      track.classList.remove("afw-vc-drag");
+      if (track.releasePointerCapture) { try { track.releasePointerCapture(e.pointerId); } catch (err) {} }
     }
     playBtn.addEventListener("click", toggle);
-    track.addEventListener("click", seek);
+    track.addEventListener("pointerdown", onDown);
+    track.addEventListener("pointermove", onMove);
+    track.addEventListener("pointerup", onUp);
+    track.addEventListener("pointercancel", onUp);
     bar.addEventListener("click", stop);
+    // In the reels player an IG tap layer hit-tests above the bar (a sibling
+    // stacking context our z-index cannot beat), so direct listeners never
+    // fire there. The document-level capture router (ensureVcPointerRouter)
+    // dispatches by geometry instead; expose the handlers it needs.
+    bar.__afwHit = {
+      playBtn: playBtn, track: track, toggle: toggle,
+      onDown: onDown, onMove: onMove, onUp: onUp,
+      isDragging: function () { return dragging; }
+    };
+    ensureVcPointerRouter();
     video.addEventListener("timeupdate", upd);
     video.addEventListener("play", icon);
     video.addEventListener("pause", icon);
@@ -2747,7 +2970,10 @@
     video.addEventListener("seeked", upd);
     video.__afwVCCleanup = function () {
       playBtn.removeEventListener("click", toggle);
-      track.removeEventListener("click", seek);
+      track.removeEventListener("pointerdown", onDown);
+      track.removeEventListener("pointermove", onMove);
+      track.removeEventListener("pointerup", onUp);
+      track.removeEventListener("pointercancel", onUp);
       bar.removeEventListener("click", stop);
       video.removeEventListener("timeupdate", upd);
       video.removeEventListener("play", icon);

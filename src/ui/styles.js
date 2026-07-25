@@ -63,12 +63,24 @@
     // it never covers that control, and the bar itself is click-through: only
     // the play button and track take clicks, so anything the bar still overlaps
     // (IG's mute, caption) stays reachable underneath.
-    ".afw-vc{position:absolute!important;left:10px;right:var(--afw-vc-right,10px)!important;bottom:10px;z-index:2147483000!important;pointer-events:none!important;display:flex!important;align-items:center;gap:10px;height:40px;padding:0 10px;background:rgba(20,20,21,.72)!important;border:1px solid var(--afw-brm)!important;border-radius:12px!important;font-family:var(--afw-font)!important;}",
+    ".afw-vc{position:absolute!important;left:10px;right:var(--afw-vc-right,10px)!important;bottom:var(--afw-vc-bottom,10px)!important;z-index:2147483000!important;pointer-events:none!important;display:flex!important;align-items:center;gap:10px;height:40px;padding:0 10px;background:rgba(20,20,21,.72)!important;border:1px solid var(--afw-brm)!important;border-radius:12px!important;font-family:var(--afw-font)!important;}",
     ".afw-vc-play{pointer-events:auto!important;width:28px;height:28px;border:0;border-radius:10px;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none;}",
     ".afw-vc-play svg{width:15px;height:15px;stroke:var(--afw-t1);fill:var(--afw-t1);}",
-    ".afw-vc-track{pointer-events:auto!important;position:relative;flex:1;height:4px;border-radius:9999px;background:var(--afw-g3);cursor:pointer;}",
+    // The track is the CLICK/DRAG target: it fills the bar's full height so the
+    // whole band is seekable, while the visible bar is the thin centered rail
+    // inside it - so the hit area is big but the yellow bar stays 4px.
+    ".afw-vc-track{pointer-events:auto!important;position:relative;flex:1;align-self:stretch;display:flex;align-items:center;cursor:pointer;touch-action:none;}",
+    ".afw-vc-rail{position:relative;width:100%;height:4px;border-radius:9999px;background:var(--afw-g3);transition:height .12s ease;}",
+    ".afw-vc-track:hover .afw-vc-rail,.afw-vc-track.afw-vc-drag .afw-vc-rail{height:6px;}",
     ".afw-vc-fill{position:absolute;left:0;top:0;bottom:0;border-radius:9999px;background:var(--afw-accent);}",
+    ".afw-vc-knob{position:absolute;top:50%;width:11px;height:11px;border-radius:9999px;background:var(--afw-accent);transform:translate(-50%,-50%);opacity:0;transition:opacity .12s ease;pointer-events:none;}",
+    ".afw-vc-track:hover .afw-vc-knob,.afw-vc-track.afw-vc-drag .afw-vc-knob{opacity:1;}",
     ".afw-vc-time{font:600 12px var(--afw-font);color:var(--afw-t1);font-variant-numeric:tabular-nums;flex:none;}",
+    // In-tile player for grid thumbnails (profile reels grid, sorted view):
+    // a lazy <video> that sits over the thumbnail and becomes visible on first
+    // play; the shared scrubber bar drives it.
+    ".afw-tp-video{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;object-fit:cover!important;display:none;z-index:5;background:#000;}",
+    ".afw-tp-video.afw-tp-on{display:block!important;}",
     ".afw-vc-time .afw-tot{color:var(--afw-t3);font-weight:400;}",
     "@media(max-width:520px){.afw-badge{height:20px;padding:0 6px}.afw-badge .afw-n{font-size:11px!important}.afw-vc{left:8px;right:8px;height:36px;gap:8px}.afw-vc-time{font-size:11px}}"
   ].join("");
