@@ -6,6 +6,7 @@
   "use strict";
   var log = function () { console.log.apply(console, ["[AI Flywheel]"].concat([].slice.call(arguments))); };
   var isInstagram = location.hostname.indexOf("instagram.com") !== -1;
+  var downloadExport = globalThis.AFWDownloadExport;
 
   // Sort logic (isolated world). MAIN-world src/schema/instagram.js does the
   // parsing; the isolated world only compares records it already received, so
@@ -380,10 +381,6 @@
       rec.__afwTakenAtFromDom = true;
     }
   }
-  function ymd(d) {
-    d = d || new Date();
-    return d.getFullYear() + ("0" + (d.getMonth() + 1)).slice(-2) + ("0" + d.getDate()).slice(-2);
-  }
   function safeFilePart(value, fallback) {
     var s = String(value || fallback || "").replace(/^@+/, "").replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
     return s || fallback || "Instagram";
@@ -479,6 +476,7 @@
         var prevVid = (prev.assets || []).some(function (a) { return a.type === "video"; });
         var newVid = (r.assets || []).some(function (a) { return a.type === "video"; });
         if (newVid && !prevVid) { prev.assets = r.assets; prev.videoUrl = r.videoUrl || prev.videoUrl; changed = true; }
+        if (prev.needsMediaInfo && !r.needsMediaInfo) { prev.needsMediaInfo = false; changed = true; }
       } else {
         registry.set(r.pk, r);
         changed = true;
@@ -1452,7 +1450,7 @@
 
   // ---- downloads + per-post menu ---------------------------------------
   // Actions waiting on an on-demand /info/ fetch, keyed by pk. Each entry is
-  // { need: "video"|"caption", run: fn }. Resolved in ingest() when enriched.
+  // { need: "video"|"caption"|"media", run: fn }. Resolved in ingest() when enriched.
   var pendingActions = new Map();
   var pendingTimers = new Map();
 
@@ -1515,6 +1513,8 @@
       if (a.need === "video") {
         var v = (rec.assets || []).filter(function (x) { return x.type === "video"; })[0];
         if (v) a.run(v); else remain.push(a);
+      } else if (a.need === "media") {
+        if (!rec.needsMediaInfo) a.run(rec); else remain.push(a);
       } else if (a.need === "caption") {
         if (rec.caption) a.run(rec.caption); else remain.push(a);
       }
@@ -1523,36 +1523,38 @@
     else { pendingActions.delete(pk); if (pendingTimers.has(pk)) { clearTimeout(pendingTimers.get(pk)); pendingTimers.delete(pk); } }
   }
 
-  // Media files land in {handle}/{postId}/ with a slide/reel leaf name:
+  // Media files land in aiflywheel-downloads/{handle}/{postId}/ with a slide/reel leaf name:
   //   single video reel   -> reel.mp4          single video cover -> cover.jpg
   //   lone photo          -> image.jpg
   //   carousel slide N    -> slide N.mp4 / slide N.jpg  (both kept per slide)
   // The carousel index comes from the asset label ("Video 3" / "Image 3"),
   // which schema/instagram.js sets from the true slide order.
   function mediaLeafName(asset) {
-    var ext = asset.type === "video" ? "mp4" : "jpg";
-    var m = String(asset.label || "").match(/(\d+)/);
-    if (m) return "slide " + (+m[1]) + "." + ext;         // carousel slide
-    if (asset.type === "video") return "reel." + ext;      // single video/reel
-    if (/cover/i.test(asset.label || "")) return "cover." + ext;
-    return "image." + ext;                                 // lone photo
+    return downloadExport.mediaLeafName(asset);
   }
   function mediaFileName(rec, asset) {
-    var handle = safeFilePart(channelHandle(rec), "instagram");
-    var postId = safeFilePart(rec.code || rec.pk || "post", "post");
-    return handle + "/" + postId + "/" + mediaLeafName(asset);
+    return downloadExport.mediaFileName(channelHandle(rec), rec, asset);
   }
-  function downloadAsset(rec, asset) {
+  function downloadAsset(rec, asset, done) {
     if (!asset || !asset.url) return;
     var name = mediaFileName(rec, asset);
-    chrome.runtime.sendMessage({ type: "afw:download", url: asset.url, filename: name, saveAs: false, conflictAction: "uniquify" }, function (res) {
-      if (chrome.runtime.lastError) log("download failed:", chrome.runtime.lastError.message);
+    chrome.runtime.sendMessage({ type: "afw:download", url: asset.url, filename: name, saveAs: false, conflictAction: "uniquify", dedupe: true }, function (res) {
+      if (chrome.runtime.lastError) {
+        log("download failed:", chrome.runtime.lastError.message);
+        if (done) done({ ok: false, status: "failed" });
+      } else if (done) done(res || { ok: false, status: "failed" });
     });
   }
-  function downloadAssets(rec, assets) {
+  function downloadAssets(rec, assets, done) {
     (assets || []).forEach(function (asset, i) {
-      setTimeout(function () { downloadAsset(rec, asset); }, i * 150);
+      setTimeout(function () { downloadAsset(rec, asset, done); }, i * 150);
     });
+  }
+  function downloadRecordMedia(rec, done) {
+    downloadAssets(rec, rec.assets || [], done);
+    if (rec.needsMediaInfo && rec.pk) {
+      addPending(rec.pk, "media", function (fresh) { downloadAssets(fresh, fresh.assets || [], done); });
+    }
   }
   function copyCaption(text) {
     if (!text) return;
@@ -1570,8 +1572,8 @@
     assets.forEach(function (a) {
       items.push({ kind: a.type, label: (a.type === "video" ? "Download " : "Download ") + a.label.toLowerCase(), asset: a });
     });
-    if (rec.kind === "video" && !(rec.assets || []).some(function (a) { return a.type === "video"; })) {
-      items.push({ kind: "video-fetch", label: "Download video" });
+    if (rec.needsMediaInfo) {
+      items.push({ kind: "media-fetch", label: rec.kind === "video" ? "Download video" : "Download remaining media" });
     }
     items.push({ kind: rec.caption ? "caption" : "caption-fetch", label: "Copy caption" });
     return items;
@@ -1612,7 +1614,7 @@
         var it = items[+btn.dataset.i];
         if (it.kind === "images-all" || it.kind === "videos-all") { downloadAssets(rec, it.assets); closeMenu(); }
         else if (it.kind === "image" || it.kind === "video") downloadAsset(rec, it.asset);
-        else if (it.kind === "video-fetch") { var s = btn.querySelector("span"); s.textContent = "Fetching video…"; addPending(rec.pk, "video", function (v) { downloadAsset(rec, v); }); }
+        else if (it.kind === "media-fetch") { var s = btn.querySelector("span"); s.textContent = "Fetching media…"; addPending(rec.pk, "media", function (fresh) { downloadAssets(fresh, fresh.assets || []); }); }
         else if (it.kind === "caption") { copyCaption(rec.caption); btn.querySelector("span").textContent = "Copied"; btn.classList.add("ok"); }
         else if (it.kind === "caption-fetch") { var s2 = btn.querySelector("span"); s2.textContent = "Fetching caption…"; addPending(rec.pk, "caption", function (t) { copyCaption(t); }); }
         if (it.kind === "image" || it.kind === "video") closeMenu();
@@ -1814,35 +1816,14 @@
     // Same order the sorted view shows: ranked snapshot + late arrivals at the end.
     return snapshotRecords(false);
   }
-  function csvCell(v) {
-    if (v == null) return "";
-    var s = String(v);
-    if (s.indexOf('"') !== -1) s = s.replace(/"/g, '""');
-    return /[",\n\r]/.test(s) ? '"' + s + '"' : s;
-  }
   function downloadCsv() {
     var records = recordsForExport();
     if (!records.length) return;
-    var header = ["Channel", "Post ID", "Shortcode", "Type", "Posted at", "Views", "Likes", "Comments", "URL", "Caption"];
-    var rows = [header].concat(records.map(function (rec) {
-      return [
-        channelHandle(rec),
-        rec.pk,
-        rec.code || "",
-        rec.kind || "",
-        dateIso(rec.takenAt),
-        rec.plays == null ? "" : rec.plays,
-        rec.likes == null ? "" : rec.likes,
-        rec.comments == null ? "" : rec.comments,
-        rec.url || (rec.code ? "https://www.instagram.com/reel/" + rec.code + "/" : ""),
-        rec.caption || ""
-      ];
-    }));
-    var csv = rows.map(function (row) { return row.map(csvCell).join(","); }).join("\n");
+    var csv = downloadExport.csvText(records, channelHandle, dateIso);
     var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     var url = URL.createObjectURL(blob);
-    var filename = safeFilePart(channelHandle(records[0]), "Instagram") + " " + ymd() + ".csv";
-    chrome.runtime.sendMessage({ type: "afw:download", url: url, filename: filename }, function () {
+    var filename = downloadExport.csvFileName(channelHandle(records[0]));
+    chrome.runtime.sendMessage({ type: "afw:download", url: url, filename: filename, saveAs: false, conflictAction: "uniquify" }, function () {
       setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
       if (chrome.runtime.lastError) log("csv download failed:", chrome.runtime.lastError.message);
     });
@@ -1852,32 +1833,32 @@
   // Records are processed one at a time on a gentle cadence so the many /info/
   // fetches for grid reels (which arrive with only a cover) don't look like a
   // scrape; per-record assets are staggered by downloadAssets itself.
-  var bulkMedia = { active: false, done: 0, total: 0 };
+  var bulkMedia = { active: false, done: 0, total: 0, downloaded: 0, skipped: 0, failed: 0 };
   function setMediaBtnState() {
     if (!toolbarRoot) return;
     var btn = toolbarRoot.querySelector("[data-a='media']");
     if (!btn) return;
     btn.classList.toggle("on", bulkMedia.active);
     btn.title = bulkMedia.active
-      ? "Downloading media… " + bulkMedia.done + " / " + bulkMedia.total
+      ? "Downloading media… " + bulkMedia.done + " / " + bulkMedia.total + " · " + bulkMedia.downloaded + " new · " + bulkMedia.skipped + " skipped"
       : "Download all media for the filtered posts";
   }
   function downloadFilteredMedia() {
     if (bulkMedia.active) return;
     var records = recordsForExport();
     if (!records.length) return;
-    bulkMedia = { active: true, done: 0, total: records.length };
+    bulkMedia = { active: true, done: 0, total: records.length, downloaded: 0, skipped: 0, failed: 0 };
     setMediaBtnState();
     var i = 0;
     (function next() {
       if (i >= records.length) { bulkMedia.active = false; setMediaBtnState(); return; }
       var rec = records[i++];
-      var assets = (rec.assets || []).slice();
-      downloadAssets(rec, assets);
-      // Grid reels arrive with only a cover; fetch the video, then download it.
-      if (rec.kind === "video" && !assets.some(function (a) { return a.type === "video"; })) {
-        addPending(rec.pk, "video", function (v) { downloadAsset(rec, v); });
-      }
+      downloadRecordMedia(rec, function (result) {
+        if (!result || !result.ok || result.status === "failed") bulkMedia.failed++;
+        else if (result.status === "already-downloaded" || result.status === "in-progress") bulkMedia.skipped++;
+        else bulkMedia.downloaded++;
+        setMediaBtnState();
+      });
       bulkMedia.done = i;
       setMediaBtnState();
       setTimeout(next, 500);

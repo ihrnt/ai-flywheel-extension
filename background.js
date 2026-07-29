@@ -10,6 +10,10 @@ const CHECKOUT_LINKS = {
 const CHECKOUT_PLANS = new Set(Object.keys(CHECKOUT_LINKS));
 const LICENSE_RETRY_MS = 15 * 60 * 1000;
 const OPTIONS_VERSION = 3;
+const DOWNLOAD_INDEX_KEY = "afwCompletedDownloads";
+const DOWNLOAD_PENDING_KEY = "afwPendingDownloads";
+const pendingDownloadKeys = new Set();
+const pendingDownloadIds = new Map();
 
 function defaultFilters() {
   return {
@@ -208,6 +212,103 @@ async function currentLicense() {
   }
 }
 
+function downloadOptions(msg) {
+  const options = { url: msg.url, filename: msg.filename };
+  if (Object.prototype.hasOwnProperty.call(msg, "saveAs")) options.saveAs = !!msg.saveAs;
+  if (msg.conflictAction) options.conflictAction = msg.conflictAction;
+  return options;
+}
+
+async function storedMap(key) {
+  const value = (await chrome.storage.local.get(key))[key];
+  return value && typeof value === "object" ? { ...value } : {};
+}
+
+async function saveMap(key, value) {
+  await chrome.storage.local.set({ [key]: value });
+}
+
+async function completedDownloadExists(key, index) {
+  const entry = index[key];
+  if (!entry || !Number.isInteger(entry.id)) return false;
+  try {
+    const items = await chrome.downloads.search({ id: entry.id });
+    const item = items && items[0];
+    if (item && item.state === "complete" && item.exists !== false) return true;
+  } catch {
+    // Treat an unavailable history item as stale so the user can retry.
+  }
+  delete index[key];
+  await saveMap(DOWNLOAD_INDEX_KEY, index);
+  return false;
+}
+
+async function managedDownload(msg) {
+  const key = String(msg.filename || "");
+  if (!key) throw new Error("A download filename is required.");
+  if (pendingDownloadKeys.has(key)) return { ok: true, status: "in-progress" };
+  pendingDownloadKeys.add(key);
+  try {
+    const index = await storedMap(DOWNLOAD_INDEX_KEY);
+    if (await completedDownloadExists(key, index)) {
+      pendingDownloadKeys.delete(key);
+      return { ok: true, status: "already-downloaded", id: index[key].id };
+    }
+
+    const id = await chrome.downloads.download(downloadOptions(msg));
+    pendingDownloadIds.set(id, { key, url: msg.url, filename: msg.filename });
+    const pending = await storedMap(DOWNLOAD_PENDING_KEY);
+    // Completion can arrive while storage is being read. In that case the
+    // onChanged handler already recorded the completed file, so do not revive
+    // a stale pending entry.
+    if (pendingDownloadIds.has(id)) {
+      pending[String(id)] = { key, url: msg.url, filename: msg.filename, requestedAt: new Date().toISOString() };
+      await saveMap(DOWNLOAD_PENDING_KEY, pending);
+    }
+    return { ok: true, status: "downloaded", id };
+  } catch (error) {
+    pendingDownloadKeys.delete(key);
+    throw error;
+  }
+}
+
+async function releasePendingDownload(id) {
+  const pending = await storedMap(DOWNLOAD_PENDING_KEY);
+  const entry = pendingDownloadIds.get(id) || pending[String(id)] || null;
+  if (entry) {
+    pendingDownloadKeys.delete(entry.key);
+    delete pending[String(id)];
+    await saveMap(DOWNLOAD_PENDING_KEY, pending);
+  }
+  pendingDownloadIds.delete(id);
+  return entry;
+}
+
+async function recordDownloadChange(delta) {
+  if (!delta || !delta.state) return;
+  const state = delta.state.current;
+  if (state === "complete") {
+    const entry = await releasePendingDownload(delta.id);
+    if (!entry) return;
+    const items = await chrome.downloads.search({ id: delta.id });
+    const item = items && items[0];
+    const index = await storedMap(DOWNLOAD_INDEX_KEY);
+    index[entry.key] = {
+      id: delta.id,
+      url: entry.url,
+      filename: item && item.filename ? item.filename : entry.filename,
+      completedAt: new Date().toISOString()
+    };
+    await saveMap(DOWNLOAD_INDEX_KEY, index);
+    return;
+  }
+  if (state === "interrupted") await releasePendingDownload(delta.id);
+}
+
+chrome.downloads.onChanged.addListener((delta) => {
+  recordDownloadChange(delta).catch(() => {});
+});
+
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureOptions();
   const stored = await chrome.storage.local.get(["license", "licenseKey", "installationId"]);
@@ -270,19 +371,17 @@ const handlers = {
     return { ok: true, license: await saveLicense(DEFAULT_LICENSE, { clearKey: true }) };
   },
   "afw:download": async (msg) => {
-    const options = {
-      url: msg.url,
-      filename: msg.filename
-    };
-    if (Object.prototype.hasOwnProperty.call(msg, "saveAs")) options.saveAs = !!msg.saveAs;
-    if (msg.conflictAction) options.conflictAction = msg.conflictAction;
-    const id = await chrome.downloads.download(options);
-    return { ok: true, id };
+    if (msg.dedupe) return managedDownload(msg);
+    const id = await chrome.downloads.download(downloadOptions(msg));
+    return { ok: true, status: "downloaded", id };
   },
   "afw:ping": async (msg) => {
     return { ok: true, pong: true, echo: msg.echo ?? null, at: Date.now() };
   }
 };
+
+// Kept public for the Node service-worker tests; harmless in the extension worker.
+globalThis.AFWBackground = { managedDownload, recordDownloadChange, completedDownloadExists };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const handler = handlers[msg && msg.type];

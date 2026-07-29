@@ -70,6 +70,30 @@
     return null;
   }
 
+  function textOrNull(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+
+  function linkUrl(media) {
+    if (typeof media.link === "string") return media.link;
+    if (!media.link || typeof media.link !== "object") return null;
+    return textOrNull(media.link.url) || textOrNull(media.link.link_url) || null;
+  }
+
+  function linkText(media) {
+    return textOrNull(media.link_text) || (media.link && textOrNull(media.link.title)) || null;
+  }
+
+  function needsMediaInfo(media) {
+    if (media.media_type === 2) return !bestVideo(media);
+    var slides = media.carousel_media;
+    if (!Array.isArray(slides)) return false;
+    return slides.some(function (slide) {
+      var isVideo = slide && (slide.media_type === 2 || slide.is_video === true);
+      return isVideo && !bestVideo(slide);
+    });
+  }
+
   function usernamesFrom(list) {
     var out = [];
     if (!Array.isArray(list)) return out;
@@ -140,11 +164,21 @@
       thumbUrl: bestImage(media),
       videoUrl: bestVideo(media),
       assets: assetsFrom(media),
+      needsMediaInfo: needsMediaInfo(media),
       paidPartnership: media.is_paid_partnership === true,
       collaborators: usernamesFrom(media.coauthor_producers),
       taggedUsers: taggedUsers,
       location: media.location && media.location.name ? media.location.name : null,
       hashtags: extractHashtags(captionText),
+      productType: textOrNull(media.product_type),
+      width: firstNum(media.original_width, media.width),
+      height: firstNum(media.original_height, media.height),
+      carouselMediaCount: firstNum(media.carousel_media_count, Array.isArray(media.carousel_media) ? media.carousel_media.length : null),
+      hasAudio: typeof media.has_audio === "boolean" ? media.has_audio : null,
+      videoDuration: numOrNull(media.video_duration),
+      accessibilityCaption: textOrNull(media.accessibility_caption),
+      externalLink: linkUrl(media),
+      externalLinkText: linkText(media),
       url: code
         ? "https://www.instagram.com/" + (isVideo ? "reel" : "p") + "/" + code + "/"
         : null
