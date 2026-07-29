@@ -120,19 +120,23 @@
 
   // Every downloadable asset on a media: cover/image, video, and each carousel
   // slide. Grid reels carry only the cover here; the video url arrives via /info/.
-  function assetsFrom(media) {
+  function assetsFrom(media, surface) {
     var out = [];
     var cm = media.carousel_media;
+    var isStory = surface === "stories";
+    function asset(type, url, label) {
+      return { type: type, url: url, label: label, story: isStory };
+    }
     if (Array.isArray(cm) && cm.length) {
       for (var i = 0; i < cm.length; i++) {
         var vid = bestVideo(cm[i]), img = bestImage(cm[i]);
-        if (vid) out.push({ type: "video", url: vid, label: "Video " + (i + 1) });
-        if (img) out.push({ type: "image", url: img, label: "Image " + (i + 1) });
+        if (vid) out.push(asset("video", vid, "Video " + (i + 1)));
+        if (img) out.push(asset("image", img, "Image " + (i + 1)));
       }
     } else {
       var v = bestVideo(media), im = bestImage(media);
-      if (v) out.push({ type: "video", url: v, label: "Video" });
-      if (im) out.push({ type: "image", url: im, label: v ? "Cover image" : "Image" });
+      if (v) out.push(asset("video", v, isStory ? "Story video" : "Video"));
+      if (im) out.push(asset("image", im, v ? "Cover image" : (isStory ? "Story image" : "Image")));
     }
     return out;
   }
@@ -161,9 +165,11 @@
       takenAt: firstNum(media.taken_at, media.taken_at_timestamp, media.created_at),
       caption: captionText,
       username: media.user && media.user.username ? media.user.username : null,
+      ownerPk: media.user && (media.user.pk != null ? String(media.user.pk) : media.user.id != null ? String(media.user.id) : null),
       thumbUrl: bestImage(media),
       videoUrl: bestVideo(media),
-      assets: assetsFrom(media),
+      assets: assetsFrom(media, surface),
+      isStory: surface === "stories",
       needsMediaInfo: needsMediaInfo(media),
       paidPartnership: media.is_paid_partnership === true,
       collaborators: usernamesFrom(media.coauthor_producers),
@@ -219,6 +225,122 @@
       if (rec) records.push(rec);
     }
     return records.length ? { surface: "info", records: records, endCursor: null } : null;
+  }
+
+  // Highlights load through the timeline connection, with the active story
+  // item at node.explore_story.media. Keep these records distinct from the
+  // ordinary timeline so content.js only uses them in the story viewer.
+  function parseStoryHighlight(json) {
+    var data = json && json.data;
+    var conn = data && data.xdt_api__v1__feed__timeline__connection;
+    if (!conn || !Array.isArray(conn.edges)) return null;
+    var records = [];
+    for (var i = 0; i < conn.edges.length; i++) {
+      var node = conn.edges[i] && conn.edges[i].node;
+      var rec = readMedia(node && node.explore_story && node.explore_story.media, "stories");
+      if (rec) records.push(rec);
+    }
+    enrichStoryUsernames(records, json);
+    return records.length ? { surface: "stories", records: records, endCursor: null } : null;
+  }
+
+  function collectStoryUsernames(value, users, state) {
+    if (!value || state.visits++ > state.maxVisits) return;
+    if (Array.isArray(value)) {
+      for (var i = 0; i < value.length; i++) collectStoryUsernames(value[i], users, state);
+      return;
+    }
+    if (typeof value !== "object") return;
+    var id = value.pk != null ? value.pk : value.id;
+    if (id != null && value.username) users[String(id)] = String(value.username);
+    for (var key in value) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) collectStoryUsernames(value[key], users, state);
+    }
+  }
+
+  // Hydrated story media often has user.pk but no username. The same payload
+  // includes the creator object elsewhere, so join it by that proven ID.
+  function enrichStoryUsernames(records, payload) {
+    var users = {};
+    collectStoryUsernames(payload, users, { visits: 0, maxVisits: 12000 });
+    for (var i = 0; i < records.length; i++) {
+      if (!records[i].username && records[i].ownerPk && users[records[i].ownerPk]) {
+        records[i].username = users[records[i].ownerPk];
+      }
+    }
+  }
+
+  // The first Highlight slide is often embedded in Instagram's initial
+  // application/json hydration script instead of arriving through fetch. Its
+  // media records retain the usual pk/media_type/code shape, so normalize
+  // them through the same bounded walker, but keep their surface story-only.
+  function parseStoryHighlightPayload(json) {
+    var records = [], seen = {};
+    collectMedia(json, "stories", records, seen, { visits: 0, maxVisits: 12000 });
+    enrichStoryUsernames(records, json);
+    return records.length ? { surface: "stories", records: records, endCursor: null } : null;
+  }
+
+  function storyCollectionMatches(collection, route) {
+    route = route || {};
+    var id = collection && collection.id != null ? String(collection.id) : "";
+    if (route.highlightId) {
+      var highlightId = String(route.highlightId);
+      return id === highlightId || id === "highlight:" + highlightId;
+    }
+    if (route.handle) {
+      var username = collection && collection.user && collection.user.username;
+      return username && String(username).toLowerCase() === String(route.handle).toLowerCase();
+    }
+    return true;
+  }
+
+  function collectStoryCollections(value, route, collections, seen, state) {
+    if (!value || state.visits++ > state.maxVisits || typeof value !== "object") return;
+    if (seen.indexOf(value) !== -1) return;
+    seen.push(value);
+    if (!Array.isArray(value) && Array.isArray(value.items) && value.items.some(function (item) {
+      return item && item.pk != null && item.media_type != null;
+    })) {
+      if (storyCollectionMatches(value, route)) collections.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (var i = 0; i < value.length; i++) collectStoryCollections(value[i], route, collections, seen, state);
+      return;
+    }
+    for (var key in value) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        collectStoryCollections(value[key], route, collections, seen, state);
+      }
+    }
+  }
+
+  // Both Highlights and ordinary account stories use ordered story
+  // collections. Preserve that order so an opaque video player can be matched
+  // to Instagram's native progress-bar index without relying on its blob URL.
+  function parseStoryViewer(json, route) {
+    var collections = [];
+    collectStoryCollections(json, route, collections, [], { visits: 0, maxVisits: 16000 });
+    if (!collections.length) return null;
+    var records = [], seen = {};
+    for (var i = 0; i < collections.length; i++) {
+      var collection = collections[i];
+      var username = collection.user && collection.user.username ? String(collection.user.username) : null;
+      var collectionId = collection.id != null ? String(collection.id) : null;
+      for (var j = 0; j < collection.items.length; j++) {
+        var rec = readMedia(collection.items[j], "stories");
+        if (!rec || seen[rec.pk]) continue;
+        if (!rec.username && username) rec.username = username;
+        rec.storyCollectionId = collectionId;
+        rec.storyIndex = j;
+        rec.storyCount = collection.items.length;
+        seen[rec.pk] = true;
+        records.push(rec);
+      }
+    }
+    enrichStoryUsernames(records, json);
+    return records.length ? { surface: "stories", records: records, endCursor: null } : null;
   }
 
   // Parse the private paginated user-feed endpoints we call directly (page.js):
@@ -334,6 +456,9 @@
     readMedia: readMedia,
     shortcodeToMediaId: shortcodeToMediaId,
     parseResponse: parseResponse,
+    parseStoryHighlight: parseStoryHighlight,
+    parseStoryHighlightPayload: parseStoryHighlightPayload,
+    parseStoryViewer: parseStoryViewer,
     parseInfo: parseInfo,
     parseUserFeed: parseUserFeed,
     parseProfile: parseProfile,

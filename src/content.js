@@ -7,6 +7,8 @@
   var log = function () { console.log.apply(console, ["[AI Flywheel]"].concat([].slice.call(arguments))); };
   var isInstagram = location.hostname.indexOf("instagram.com") !== -1;
   var downloadExport = globalThis.AFWDownloadExport;
+  var storyHighlight = globalThis.AFWStoryHighlight;
+  var controlOffsets = globalThis.AFWControlOffsets;
 
   // Sort logic (isolated world). MAIN-world src/schema/instagram.js does the
   // parsing; the isolated world only compares records it already received, so
@@ -159,6 +161,18 @@
     if (path === "/") return { kind: "home", key: "home", sortable: false };
     if (/^\/explore(?:\/|$)/.test(path)) return { kind: "explore", key: "explore", sortable: true };
     if (/^\/reels(?:\/|$)/.test(path)) return { kind: "reels-feed", key: "reels-feed", sortable: false };
+    var storyMatch = path.match(/^\/stories\/highlights\/([^/?#]+)$/i);
+    if (storyMatch) return { kind: "stories-highlight", key: "stories:highlight:" + storyMatch[1], highlightId: storyMatch[1], sortable: false };
+    var userStoryMatch = path.match(/^\/stories\/([^/?#]+)(?:\/([^/?#]+))?$/i);
+    if (userStoryMatch && userStoryMatch[1].toLowerCase() !== "highlights") {
+      return {
+        kind: "stories-user",
+        key: "stories:user:" + userStoryMatch[1].toLowerCase(),
+        handle: userStoryMatch[1],
+        storyPk: userStoryMatch[2] || null,
+        sortable: false
+      };
+    }
     var handle = profileHandle();
     if (handle && new RegExp("^/" + handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/reels$", "i").test(path)) {
       return { kind: "profile-reels", key: "profile:" + handle.toLowerCase() + ":reels", handle: handle, sortable: true };
@@ -278,6 +292,10 @@
     activeStore = newRouteStore();
     toolbarRenderKey = "";
     loadCachedSurface(next); // warm the registry from IndexedDB on a fresh surface
+    // Instagram can finish a Highlight SPA transition without adding a new
+    // script node. Ask the MAIN-world capture to rescan after this isolated
+    // world has positively identified the Highlight route.
+    if (next.kind === "stories-highlight" || next.kind === "stories-user") sendToPage("stories:scan");
     return next;
   }
 
@@ -441,6 +459,7 @@
   // a profile route (late responses from a previous profile, home-feed
   // prefetches). Those still merge into the session cache for later reuse.
   function belongsToRoute(rec) {
+    if (activeSurface.kind === "stories-highlight" || activeSurface.kind === "stories-user") return !!(rec && rec.isStory);
     if (activeSurface.kind !== "profile-posts" && activeSurface.kind !== "profile-reels") return true;
     if (!rec.username) return true;
     var handle = normalHandle(activeSurface.handle);
@@ -823,6 +842,76 @@
     });
     return best;
   }
+  function visibleStoryMedia() {
+    var best = null, bestArea = 0;
+    [].slice.call(document.querySelectorAll("video,img")).forEach(function (media) {
+      var rect = media.getBoundingClientRect();
+      var width = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+      var height = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+      var area = width * height;
+      if (width < 250 || height < 250 || area <= bestArea) return;
+      best = media;
+      bestArea = area;
+    });
+    return best;
+  }
+  function storyHostForMedia(media) {
+    if (!media) return null;
+    var mediaRect = media.getBoundingClientRect();
+    var host = media.parentElement, fallback = null, sameFrameHost = null;
+    for (var i = 0; host && i < 12; i++, host = host.parentElement) {
+      if (!goodHost(host)) continue;
+      var rect = host.getBoundingClientRect();
+      if (!fallback) fallback = host;
+      var sameFrame = Math.abs(rect.left - mediaRect.left) <= 3 && Math.abs(rect.top - mediaRect.top) <= 3 &&
+        Math.abs(rect.width - mediaRect.width) <= 3 && Math.abs(rect.height - mediaRect.height) <= 3;
+      if (!sameFrame) continue;
+      if (!sameFrameHost) sameFrameHost = host;
+      // Instagram mounts a transparent click-capture layer for story videos in
+      // a sibling subtree. Put our overlay on their smallest common frame so
+      // the download action can sit above that layer and receive its own click.
+      if (media.tagName === "VIDEO" &&
+        host.querySelector('[role="group"][aria-label="Video player"]')) return host;
+      if (media.tagName !== "VIDEO") return host;
+    }
+    return sameFrameHost || fallback;
+  }
+
+  function storyCoverSources(media) {
+    if (!media || media.tagName !== "VIDEO") return [];
+    var out = [];
+    var poster = media.poster || media.getAttribute("poster");
+    if (poster) out.push(poster);
+    var mediaRect = media.getBoundingClientRect();
+    var parent = media.parentElement;
+    for (var depth = 0; parent && depth < 3; depth++, parent = parent.parentElement) {
+      var images = parent.querySelectorAll("img");
+      for (var i = 0; i < images.length; i++) {
+        var image = images[i];
+        var rect = image.getBoundingClientRect();
+        if (Math.abs(rect.left - mediaRect.left) <= 3 && Math.abs(rect.top - mediaRect.top) <= 3 &&
+          Math.abs(rect.width - mediaRect.width) <= 3 && Math.abs(rect.height - mediaRect.height) <= 3) {
+          out.push(image.currentSrc || image.src);
+        }
+      }
+    }
+    return out;
+  }
+  function storyProgressIndex(media) {
+    if (!media) return null;
+    var mediaRect = media.getBoundingClientRect();
+    var candidates = [];
+    [].slice.call(document.querySelectorAll("div")).forEach(function (node) {
+      var rect = node.getBoundingClientRect();
+      if (rect.left < mediaRect.left - 5 || rect.right > mediaRect.right + 5 ||
+        rect.top < mediaRect.top || rect.top >= mediaRect.top + 60 ||
+        rect.width < 5 || rect.width > 150 || rect.height < 1 || rect.height > 6) return;
+      candidates.push(node);
+    });
+    return storyHighlight && storyHighlight.progressIndexForCandidates
+      ? storyHighlight.progressIndexForCandidates(candidates)
+      : null;
+  }
   function collectLooseTiles() {
     var out = [], seen = new Set();
     function add(host, code) {
@@ -837,6 +926,24 @@
       }
       seen.add(host);
       out.push({ el: host, row: null, code: code, rec: rec });
+    }
+    if (activeSurface.kind === "stories-highlight" || activeSurface.kind === "stories-user") {
+      var storyMedia = visibleStoryMedia();
+      var storySource = storyMedia && (storyMedia.currentSrc || storyMedia.src);
+      var storyRec = storyHighlight && storyHighlight.recordForVisibleMedia(memberRecords(), {
+        source: storySource,
+        poster: storyMedia && (storyMedia.poster || storyMedia.getAttribute("poster")),
+        covers: storyCoverSources(storyMedia),
+        storyIndex: storyProgressIndex(storyMedia),
+        storyPk: activeSurface.storyPk,
+        isVideo: storyMedia && storyMedia.tagName === "VIDEO"
+      });
+      var storyHost = storyHostForMedia(storyMedia);
+      if (storyRec && storyHost) {
+        seen.add(storyHost);
+        out.push({ el: storyHost, row: null, code: storyRec.code, rec: storyRec, story: true });
+      }
+      return out;
     }
     if (activeSurface.kind === "reels-feed") {
       var reelVideo = visibleVideo();
@@ -1077,7 +1184,7 @@
     // Lift the stats badges above each tile's scrubber bar right away - fresh
     // tiles would otherwise wait for the next native render tick and flash the
     // badges underneath the bar. Rect reads only, cheap on the scroll path.
-    sv.mounted.forEach(function (t) { updateControlOffset(t); });
+    sv.mounted.forEach(function (t) { controlOffsets.updateControlOffset(t, liveBars); });
   }
 
   function renderSortedView() {
@@ -1155,7 +1262,7 @@
   function clearBadges() {
     nativeOverlays().forEach(function (old) { old.remove(); });
     [].slice.call(document.querySelectorAll(".afw-tile")).forEach(function (host) {
-      host.classList.remove("afw-tile", "afw-has-vc");
+      host.classList.remove("afw-tile", "afw-story-tile", "afw-has-vc");
       host.style.removeProperty("--afw-stats-bottom");
       delete host.__afwOverlayKey;
     });
@@ -1168,7 +1275,7 @@
       if (keep.has(host)) return;
       overlay.remove();
       if (host) {
-        host.classList.remove("afw-tile");
+        host.classList.remove("afw-tile", "afw-story-tile");
         host.style.removeProperty("--afw-stats-bottom");
         delete host.__afwOverlayKey;
       }
@@ -1178,36 +1285,6 @@
   // All mounted scrubber bars, maintained by mountScrubber/cleanup so the
   // offset pass never has to scan the whole document.
   var liveBars = [];
-  function visibleControlForHost(host) {
-    if (!host) return null;
-    var bars = [].slice.call(host.querySelectorAll(".afw-vc"));
-    for (var i = 0; i < bars.length; i++) {
-      var cs = getComputedStyle(bars[i]);
-      if (cs.display !== "none" && cs.visibility !== "hidden" && bars[i].getBoundingClientRect().height) return bars[i];
-    }
-    var hr = host.getBoundingClientRect && host.getBoundingClientRect();
-    if (!hr) return null;
-    for (var j = 0; j < liveBars.length; j++) {
-      var br = liveBars[j].getBoundingClientRect();
-      if (!br.width || !br.height) continue;
-      var overlaps = br.left < hr.right && br.right > hr.left && br.top < hr.bottom && br.bottom > hr.top;
-      if (overlaps) return liveBars[j];
-    }
-    return null;
-  }
-  function updateControlOffset(host) {
-    var bar = visibleControlForHost(host);
-    if (!bar) {
-      host.classList.remove("afw-has-vc");
-      host.style.removeProperty("--afw-stats-bottom");
-      return;
-    }
-    var hr = host.getBoundingClientRect();
-    var br = bar.getBoundingClientRect();
-    var offset = Math.max(52, Math.ceil(hr.bottom - br.top + 8));
-    host.classList.add("afw-has-vc");
-    host.style.setProperty("--afw-stats-bottom", offset + "px");
-  }
   function refreshControlOffsets() {
     // Sweep bars whose tiles were removed wholesale (sorted-view teardown,
     // virtualized windows) so liveBars never accumulates dead entries.
@@ -1218,7 +1295,9 @@
         else liveBars.splice(s, 1);
       }
     }
-    [].slice.call(document.querySelectorAll(".afw-tile,.afw-sv-tile")).forEach(updateControlOffset);
+    [].slice.call(document.querySelectorAll(".afw-tile,.afw-sv-tile")).forEach(function (host) {
+      controlOffsets.updateControlOffset(host, liveBars);
+    });
     for (var i = 0; i < liveBars.length; i++) updateBarInset(liveBars[i]);
   }
 
@@ -1310,15 +1389,16 @@
     ].join("|");
   }
 
-  function metricBadges(rec) {
-    return [
+  function metricBadges(rec, availableOnly) {
+    var metrics = [
       { icon: ICONS.eye, val: rec.plays, title: "Views" },
       { icon: ICONS.heart, val: rec.likes, title: "Likes" },
       { icon: ICONS.comment, val: rec.comments, title: "Comments" }
     ];
+    return availableOnly ? metrics.filter(function (metric) { return metric.val != null; }) : metrics;
   }
 
-  function buildOverlay(rec, rankIdx, breakoutX) {
+  function buildOverlay(rec, rankIdx, breakoutX, opts) {
     var ov = el("div", "afw-overlay");
     ov.appendChild(el("div", "afw-scrim"));
 
@@ -1333,15 +1413,15 @@
 
     var bottom = el("div", "afw-bottom");
     var stats = el("div", "afw-stats");
-    metricBadges(rec).forEach(function (m) {
+    metricBadges(rec, opts && opts.availableMetrics).forEach(function (m) {
       var b = el("span", "afw-badge", svg(m.icon) + "<span class='afw-n'>" + fmt(m.val) + "</span>");
       b.title = m.title;
       stats.appendChild(b);
     });
-    bottom.appendChild(stats);
+    if (stats.children.length) bottom.appendChild(stats);
     var posted = dateLabel(rec.takenAt);
     if (posted) bottom.appendChild(el("span", "afw-date", svg(ICONS.calendar) + "<span>" + posted + "</span>"));
-    ov.appendChild(bottom);
+    if (bottom.children.length) ov.appendChild(bottom);
 
     if (options.instagram.downloads) {
       var dl = el("div", "afw-dl", svg(ICONS.download));
@@ -1424,7 +1504,7 @@
       if (!t.rec) {
         if (old) old.remove();
         cleanupTilePlayer(host);
-        host.classList.remove("afw-tile");
+        host.classList.remove("afw-tile", "afw-story-tile");
         delete host.__afwOverlayKey;
         return;
       }
@@ -1436,12 +1516,13 @@
         if (positionedHosts) positionedHosts.add(host);
       }
       host.classList.add("afw-tile");
+      host.classList.toggle("afw-story-tile", !!t.story);
       if (options.instagram.videoControls) ensureTilePlayer(host, rec);
       var rankIdx = info.rankByPk.has(rec.pk) ? info.rankByPk.get(rec.pk) : null;
       var breakoutX = info.breakoutByPk.get(rec.pk) || "";
       var key = overlayKey(rec, s.by, rankIdx, breakoutX);
       if (old && host.__afwOverlayKey === key) return;
-      var ov = buildOverlay(rec, rankIdx, breakoutX);
+      var ov = buildOverlay(rec, rankIdx, breakoutX, t.story ? { availableMetrics: true } : null);
       host.__afwOverlayKey = key;
       if (old) old.replaceWith(ov);
       else host.appendChild(ov);
@@ -3049,6 +3130,9 @@
   function boot() {
     if (window.AFW && window.AFW.injectStyles) window.AFW.injectStyles(document);
     mo.observe(document.body, { childList: true, subtree: true });
+    if (activeSurface.kind === "stories-highlight" || activeSurface.kind === "stories-user") {
+      sendToPage("stories:scan");
+    }
     // react to option/license changes made in the popup or another tab.
     // setFilters already bumps locally before the storage round-trip, so we
     // only bump here when the change came from elsewhere (popup/other tab).

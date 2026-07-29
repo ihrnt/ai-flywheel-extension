@@ -29,6 +29,11 @@
     ".afw-tile:hover .afw-dl{opacity:1;}",
     ".afw-dl svg{width:14px;height:14px;stroke:var(--afw-t1);fill:none;stroke-width:2;}",
     ".afw-dl:hover{background:var(--afw-g3)!important;}",
+    // Story reply controls occupy the bottom edge and the header owns the top
+    // row. Keep AI Flywheel's labels clear of the reply field and make the
+    // download action available without relying on hover.
+    ".afw-story-tile .afw-bottom{bottom:max(var(--afw-stats-bottom,8px),76px)!important;}",
+    ".afw-story-tile .afw-dl{opacity:1!important;top:96px!important;}",
 
     // Sorted view: a fixed overlay with its own scroller, fully decoupled from
     // Instagram's DOM. The native page stays untouched underneath (its scroll

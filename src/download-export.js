@@ -9,6 +9,11 @@
 
   function mediaLeafName(asset) {
     var ext = asset.type === "video" ? "mp4" : "jpg";
+    if (asset.story) {
+      if (asset.type === "video") return "story." + ext;
+      if (/cover/i.test(asset.label || "")) return "cover." + ext;
+      return "story." + ext;
+    }
     var match = String(asset.label || "").match(/(\d+)/);
     if (match) return "slide " + (+match[1]) + "." + ext;
     if (asset.type === "video") return "reel." + ext;
@@ -18,7 +23,7 @@
 
   function mediaFileName(handle, record, asset) {
     return "aiflywheel-downloads/" + safeFilePart(handle, "instagram") + "/" +
-      safeFilePart(record && (record.code || record.pk), "post") + "/" + mediaLeafName(asset || {});
+      safeFilePart(record && (record.isStory ? record.pk : (record.code || record.pk)), "post") + "/" + mediaLeafName(asset || {});
   }
 
   function exportTimestamp(d) {

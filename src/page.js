@@ -16,6 +16,32 @@
 
   const isInstagram = location.hostname.indexOf("instagram.com") !== -1;
   const ABOUT_APP = "com.bloks.www.ig.about_this_account";
+  function storyRoute() {
+    var highlight = location.pathname.match(/^\/stories\/highlights\/([^/?#]+)\/?$/i);
+    if (highlight) return { kind: "highlight", highlightId: highlight[1] };
+    var regular = location.pathname.match(/^\/stories\/([^/?#]+)(?:\/[^/?#]+)?\/?$/i);
+    if (regular && regular[1].toLowerCase() !== "highlights") {
+      return { kind: "user", handle: decodeURIComponent(regular[1]) };
+    }
+    return null;
+  }
+  function storyRouteKey(route) {
+    if (!route) return "";
+    return route.kind === "highlight" ? "highlight:" + route.highlightId : "user:" + String(route.handle || "").toLowerCase();
+  }
+  let latestStoryRecords = null;
+  function rememberStoryRecords(route, parsed) {
+    if (!route || !parsed || !parsed.records || !parsed.records.length) return;
+    latestStoryRecords = {
+      key: storyRouteKey(route),
+      data: {
+        platform: "instagram",
+        surface: parsed.surface,
+        records: parsed.records,
+        endCursor: parsed.endCursor || null
+      }
+    };
+  }
 
   // Feed matched Instagram responses to content.js as flat records.
   function handleBody(url, body) {
@@ -33,7 +59,17 @@
       profile.profileLoaded = true;
       send("profile", { platform: "instagram", profile });
     }
-    const parsed = schema.parseResponse(json) || schema.parseInfo(json);
+    // Direct loads and SPA-opened viewers use different envelopes. Prefer the
+    // selected ordered story collection for Highlights and ordinary stories.
+    const route = storyRoute();
+    const selectedStory = route && schema.parseStoryViewer && schema.parseStoryViewer(json, route);
+    const storyParsed = route && (
+      selectedStory ||
+      (schema.parseStoryHighlight && schema.parseStoryHighlight(json)) ||
+      (schema.parseStoryHighlightPayload && schema.parseStoryHighlightPayload(json))
+    );
+    if (selectedStory) rememberStoryRecords(route, selectedStory);
+    const parsed = storyParsed || schema.parseResponse(json) || schema.parseInfo(json);
     if (parsed && parsed.records.length) {
       send("records", {
         platform: "instagram",
@@ -42,6 +78,61 @@
         endCursor: parsed.endCursor
       });
     }
+  }
+
+  // Instagram serializes Highlight slides into an application/json hydration
+  // script on the initial route. Fetch interception alone misses those slides.
+  let seenHighlightScripts = new WeakSet();
+  let highlightScanQueued = false;
+  let highlightSchemaRetries = 0;
+  let highlightDomReady = document.readyState !== "loading";
+  function captureHighlightHydration() {
+    highlightScanQueued = false;
+    var route = storyRoute();
+    if (!highlightDomReady || !isInstagram || !route) return;
+    const schema = (window.AFW && window.AFW.schema) || null;
+    if (!schema || !schema.parseStoryViewer) {
+      if (highlightSchemaRetries++ < 20) setTimeout(scheduleHighlightHydration, 50);
+      return;
+    }
+    document.querySelectorAll('script[type="application/json"]').forEach((script) => {
+      if (seenHighlightScripts.has(script)) return;
+      seenHighlightScripts.add(script);
+      const body = script.textContent || "";
+      if (body.indexOf('"media_type"') === -1) return;
+      let json;
+      try {
+        json = JSON.parse(body);
+      } catch {
+        return;
+      }
+      const selectedStory = schema.parseStoryViewer(json, route);
+      const parsed = selectedStory ||
+        (schema.parseStoryHighlightPayload && schema.parseStoryHighlightPayload(json));
+      if (parsed && parsed.records.length) {
+        if (selectedStory) rememberStoryRecords(route, selectedStory);
+        send("records", {
+          platform: "instagram",
+          surface: parsed.surface,
+          records: parsed.records,
+          endCursor: null
+        });
+      }
+    });
+  }
+  function scheduleHighlightHydration() {
+    if (highlightScanQueued) return;
+    highlightScanQueued = true;
+    setTimeout(captureHighlightHydration, 0);
+  }
+  if (isInstagram) {
+    document.addEventListener("DOMContentLoaded", () => {
+      highlightDomReady = true;
+      setTimeout(scheduleHighlightHydration, 250);
+    }, { once: true });
+    window.addEventListener("load", () => setTimeout(scheduleHighlightHydration, 250), { once: true });
+    new MutationObserver(scheduleHighlightHydration).observe(document.documentElement || document, { childList: true, subtree: true });
+    if (highlightDomReady) setTimeout(scheduleHighlightHydration, 250);
   }
 
   function textKey(obj) {
@@ -248,17 +339,23 @@
     const result = nativePush.apply(this, arguments);
     cancelActiveAboutCapture();
     send("nav", { href: location.href });
+    // Highlight data can be prefetched while the profile route is still
+    // active. Once Instagram commits the Highlight SPA route, scan those
+    // already-present hydration scripts for the current slide records.
+    scheduleHighlightHydration();
     return result;
   };
   history.replaceState = function () {
     const result = nativeReplace.apply(this, arguments);
     cancelActiveAboutCapture();
     send("nav", { href: location.href });
+    scheduleHighlightHydration();
     return result;
   };
   window.addEventListener("popstate", () => {
     cancelActiveAboutCapture();
     send("nav", { href: location.href });
+    scheduleHighlightHydration();
   });
 
   // Instagram web app id, needed to call the private /info/ endpoint. Read from
@@ -508,6 +605,15 @@
     }
     if (msg.type === "ping") {
       send("pong", { echo: msg.data ?? null, world: "MAIN", href: location.href });
+    }
+    if (msg.type === "stories:scan") {
+      var route = storyRoute();
+      if (route && latestStoryRecords && latestStoryRecords.key === storyRouteKey(route)) {
+        send("records", latestStoryRecords.data);
+      } else {
+        seenHighlightScripts = new WeakSet();
+        scheduleHighlightHydration();
+      }
     }
     if (msg.type === "fetchInfo" && msg.data && msg.data.pk) {
       // Fetch single-media detail. The response flows back through the patched
