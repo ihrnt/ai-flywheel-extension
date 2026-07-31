@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AI Flywheel Extension",
   "description": "Sort Instagram profiles, Reels, and Explore by real engagement. See the views, likes, and comments the app hides.",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",

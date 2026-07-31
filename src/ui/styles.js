@@ -27,6 +27,7 @@
     ".afw-date svg{width:11px;height:11px;stroke:var(--afw-t2);fill:none;stroke-width:2;flex:none;}",
     ".afw-dl{position:absolute!important;top:8px;right:8px;width:28px;height:28px;border-radius:10px;background:rgba(20,20,21,.72)!important;border:1px solid var(--afw-brm)!important;display:flex!important;align-items:center;justify-content:center;cursor:pointer;pointer-events:auto!important;opacity:0;transition:opacity .12s;}",
     ".afw-tile:hover .afw-dl{opacity:1;}",
+    ".afw-dl-visible{opacity:1!important;}",
     ".afw-dl svg{width:14px;height:14px;stroke:var(--afw-t1);fill:none;stroke-width:2;}",
     ".afw-dl:hover{background:var(--afw-g3)!important;}",
     // Story reply controls occupy the bottom edge and the header owns the top
@@ -71,6 +72,8 @@
     ".afw-vc{position:absolute!important;left:10px;right:var(--afw-vc-right,10px)!important;bottom:var(--afw-vc-bottom,10px)!important;z-index:2147483000!important;pointer-events:none!important;display:flex!important;align-items:center;gap:10px;height:40px;padding:0 10px;background:rgba(20,20,21,.72)!important;border:1px solid var(--afw-brm)!important;border-radius:12px!important;font-family:var(--afw-font)!important;}",
     ".afw-vc-play{pointer-events:auto!important;width:28px;height:28px;border:0;border-radius:10px;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none;}",
     ".afw-vc-play svg{width:15px;height:15px;stroke:var(--afw-t1);fill:var(--afw-t1);}",
+    ".afw-vc-mute{pointer-events:auto!important;width:28px;height:28px;border:0;border-radius:10px;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none;}",
+    ".afw-vc-mute svg{width:15px;height:15px;stroke:var(--afw-t1);fill:none;stroke-width:2;}",
     // The track is the CLICK/DRAG target: it fills the bar's full height so the
     // whole band is seekable, while the visible bar is the thin centered rail
     // inside it - so the hit area is big but the yellow bar stays 4px.
@@ -87,6 +90,9 @@
     ".afw-tp-video{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;object-fit:cover!important;display:none;z-index:5;background:#000;}",
     ".afw-tp-video.afw-tp-on{display:block!important;}",
     ".afw-vc-time .afw-tot{color:var(--afw-t3);font-weight:400;}",
+    ".afw-audio-dl{margin-left:8px!important;min-height:32px;padding:0 12px;border:1px solid var(--afw-br)!important;border-radius:8px!important;background:var(--afw-g2)!important;color:var(--afw-t1)!important;font:600 12px var(--afw-font)!important;display:inline-flex!important;align-items:center!important;gap:7px;cursor:pointer;}",
+    ".afw-audio-dl:hover{background:var(--afw-g3)!important;}.afw-audio-dl:disabled{opacity:.55;cursor:wait;}",
+    ".afw-audio-dl svg{width:14px;height:14px;stroke:var(--afw-t1);fill:none;stroke-width:2;}",
     "@media(max-width:520px){.afw-badge{height:20px;padding:0 6px}.afw-badge .afw-n{font-size:11px!important}.afw-vc{left:8px;right:8px;height:36px;gap:8px}.afw-vc-time{font-size:11px}}"
   ].join("");
 

@@ -64,10 +64,58 @@
     return null;
   }
 
-  function bestVideo(media) {
+  function bestVideoEntry(media) {
     var vv = media.video_versions;
-    if (Array.isArray(vv) && vv.length && vv[0].url) return vv[0].url;
+    if (!Array.isArray(vv)) return null;
+    for (var i = 0; i < vv.length; i++) if (vv[i] && vv[i].url) return vv[i];
     return null;
+  }
+
+  function bestVideo(media) {
+    var entry = bestVideoEntry(media);
+    return entry ? entry.url : null;
+  }
+
+  function decodeXml(value) {
+    return String(value || "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+  }
+
+  function xmlAttr(text, name) {
+    var match = String(text || "").match(new RegExp("\\b" + name + "\\s*=\\s*(['\\\"])(.*?)\\1", "i"));
+    return match ? decodeXml(match[2]) : null;
+  }
+
+  function parseDashManifest(manifest) {
+    var result = { videoOnly: [], audioOnly: null };
+    if (typeof manifest !== "string" || manifest.indexOf("<MPD") === -1) return result;
+    var videoByQuality = Object.create(null), bestAudio = null;
+    var adaptationRe = /<AdaptationSet\b([^>]*)>([\s\S]*?)<\/AdaptationSet>/gi;
+    var adaptation;
+    while ((adaptation = adaptationRe.exec(manifest))) {
+      var type = xmlAttr(adaptation[1], "contentType") || xmlAttr(adaptation[1], "mimeType") || "";
+      type = type.toLowerCase();
+      var repRe = /<Representation\b([^>]*)>([\s\S]*?)<\/Representation>/gi;
+      var rep;
+      while ((rep = repRe.exec(adaptation[2]))) {
+        var base = rep[2].match(/<BaseURL>([\s\S]*?)<\/BaseURL>/i);
+        var url = base ? decodeXml(base[1].trim()) : null;
+        if (!url) continue;
+        var bandwidth = Number(xmlAttr(rep[1], "bandwidth")) || 0;
+        if (type === "audio" || /audio\//.test(xmlAttr(rep[1], "mimeType") || "")) {
+          if (!bestAudio || bandwidth > bestAudio.bandwidth) bestAudio = { url: url, bandwidth: bandwidth, codecs: xmlAttr(rep[1], "codecs") || null };
+          continue;
+        }
+        if (type !== "video" && !/video\//.test(xmlAttr(rep[1], "mimeType") || "")) continue;
+        var height = Number(xmlAttr(rep[1], "height")) || null;
+        var quality = xmlAttr(rep[1], "FBQualityLabel") || (height ? height + "p" : null);
+        if (!quality) continue;
+        var candidate = { url: url, width: Number(xmlAttr(rep[1], "width")) || null, height: height, quality: quality, bandwidth: bandwidth, codecs: xmlAttr(rep[1], "codecs") || null };
+        if (!videoByQuality[quality] || bandwidth > videoByQuality[quality].bandwidth) videoByQuality[quality] = candidate;
+      }
+    }
+    result.videoOnly = Object.keys(videoByQuality).map(function (quality) { return videoByQuality[quality]; }).sort(function (a, b) { return parseInt(a.quality, 10) - parseInt(b.quality, 10); });
+    result.audioOnly = bestAudio;
+    return result;
   }
 
   function textOrNull(value) {
@@ -82,6 +130,17 @@
 
   function linkText(media) {
     return textOrNull(media.link_text) || (media.link && textOrNull(media.link.title)) || null;
+  }
+
+  function audioInfo(media) {
+    var clips = media && media.clips_metadata;
+    var music = clips && clips.music_info && clips.music_info.music_asset_info;
+    if (!music || !textOrNull(music.title)) return null;
+    return {
+      title: textOrNull(music.title),
+      artist: textOrNull(music.display_artist),
+      audioId: music.audio_cluster_id != null ? String(music.audio_cluster_id) : null
+    };
   }
 
   function needsMediaInfo(media) {
@@ -127,15 +186,33 @@
     function asset(type, url, label) {
       return { type: type, url: url, label: label, story: isStory };
     }
+    function videoAsset(item, label) {
+      var entry = bestVideoEntry(item);
+      if (!entry) return null;
+      var out = asset("video", entry.url, label);
+      var width = firstNum(entry.width, item.original_width, item.width);
+      var height = firstNum(entry.height, item.original_height, item.height);
+      if (width != null) out.width = width;
+      if (height != null) out.height = height;
+      var audio = audioInfo(item);
+      if (audio) {
+        out.audioTitle = audio.title;
+        out.audioArtist = audio.artist;
+        out.audioId = audio.audioId;
+      }
+      var variants = parseDashManifest(item.video_dash_manifest);
+      if (variants.videoOnly.length || variants.audioOnly) out.downloadVariants = variants;
+      return out;
+    }
     if (Array.isArray(cm) && cm.length) {
       for (var i = 0; i < cm.length; i++) {
-        var vid = bestVideo(cm[i]), img = bestImage(cm[i]);
-        if (vid) out.push(asset("video", vid, "Video " + (i + 1)));
+        var vid = videoAsset(cm[i], "Video " + (i + 1)), img = bestImage(cm[i]);
+        if (vid) out.push(vid);
         if (img) out.push(asset("image", img, "Image " + (i + 1)));
       }
     } else {
-      var v = bestVideo(media), im = bestImage(media);
-      if (v) out.push(asset("video", v, isStory ? "Story video" : "Video"));
+      var v = videoAsset(media, isStory ? "Story video" : "Video"), im = bestImage(media);
+      if (v) out.push(v);
       if (im) out.push(asset("image", im, v ? "Cover image" : (isStory ? "Story image" : "Image")));
     }
     return out;
@@ -181,6 +258,7 @@
       height: firstNum(media.original_height, media.height),
       carouselMediaCount: firstNum(media.carousel_media_count, Array.isArray(media.carousel_media) ? media.carousel_media.length : null),
       hasAudio: typeof media.has_audio === "boolean" ? media.has_audio : null,
+      audio: audioInfo(media),
       videoDuration: numOrNull(media.video_duration),
       accessibilityCaption: textOrNull(media.accessibility_caption),
       externalLink: linkUrl(media),
@@ -455,6 +533,7 @@
     IG_SORT_FIELD: IG_SORT_FIELD,
     readMedia: readMedia,
     shortcodeToMediaId: shortcodeToMediaId,
+    parseDashManifest: parseDashManifest,
     parseResponse: parseResponse,
     parseStoryHighlight: parseStoryHighlight,
     parseStoryHighlightPayload: parseStoryHighlightPayload,
@@ -464,6 +543,7 @@
     parseProfile: parseProfile,
     compareRecords: compareRecords,
     extractHashtags: extractHashtags,
+    audioInfo: audioInfo,
     usernamesFrom: usernamesFrom
   };
 

@@ -160,6 +160,8 @@
     var path = location.pathname.replace(/\/+$/, "") || "/";
     if (path === "/") return { kind: "home", key: "home", sortable: false };
     if (/^\/explore(?:\/|$)/.test(path)) return { kind: "explore", key: "explore", sortable: true };
+    var audioMatch = path.match(/^\/reels\/audio\/([^/?#]+)$/i);
+    if (audioMatch) return { kind: "audio", key: "audio:" + audioMatch[1], audioId: audioMatch[1], sortable: false };
     if (/^\/reels(?:\/|$)/.test(path)) return { kind: "reels-feed", key: "reels-feed", sortable: false };
     var storyMatch = path.match(/^\/stories\/highlights\/([^/?#]+)$/i);
     if (storyMatch) return { kind: "stories-highlight", key: "stories:highlight:" + storyMatch[1], highlightId: storyMatch[1], sortable: false };
@@ -341,6 +343,8 @@
     funnel: "<path d='M3 4h18l-7 8v6l-4 2v-8z'/>",
     grip: "<circle cx='9' cy='6' r='1.4'/><circle cx='15' cy='6' r='1.4'/><circle cx='9' cy='12' r='1.4'/><circle cx='15' cy='12' r='1.4'/><circle cx='9' cy='18' r='1.4'/><circle cx='15' cy='18' r='1.4'/>",
     search: "<circle cx='11' cy='11' r='7'/><line x1='21' y1='21' x2='16.65' y2='16.65'/>",
+    volume: "<polygon points='5 9 9 9 14 5 14 19 9 15 5 15 5 9'/><path d='M17 9a4 4 0 0 1 0 6'/><path d='M19.5 6.5a7.5 7.5 0 0 1 0 11'/>",
+    mute: "<polygon points='5 9 9 9 14 5 14 19 9 15 5 15 5 9'/><line x1='18' y1='9' x2='22' y2='15'/><line x1='22' y1='9' x2='18' y2='15'/>",
     close: "<line x1='6' y1='6' x2='18' y2='18'/><line x1='18' y1='6' x2='6' y2='18'/>"
   };
   function svg(paths) {
@@ -494,7 +498,9 @@
         // assets is never null, so upgrade it when /info/ brings the video the grid lacked
         var prevVid = (prev.assets || []).some(function (a) { return a.type === "video"; });
         var newVid = (r.assets || []).some(function (a) { return a.type === "video"; });
-        if (newVid && !prevVid) { prev.assets = r.assets; prev.videoUrl = r.videoUrl || prev.videoUrl; changed = true; }
+        // /info/ responses carry short-lived signed media URLs. Prefer their
+        // complete asset set even when a cached/list payload already had video.
+        if (newVid && (!prevVid || r.surface === "info")) { prev.assets = r.assets; prev.videoUrl = r.videoUrl || prev.videoUrl; changed = true; }
         if (prev.needsMediaInfo && !r.needsMediaInfo) { prev.needsMediaInfo = false; changed = true; }
       } else {
         registry.set(r.pk, r);
@@ -781,8 +787,12 @@
     return m ? m[1] : null;
   }
   function pageCode() {
-    var m = location.pathname.match(/\/(?:p|reel|reels|tv)\/([^/?#]+)/);
-    return m ? m[1] : null;
+    var m = location.pathname.match(/\/(?:p|reel|tv)\/([^/?#]+)/);
+    if (m) return m[1];
+    // The main Reels feed keeps the current item in /reels/{code}/. Exclude
+    // /reels/audio/{id}/ so a real audio page is never mistaken for a reel.
+    var reels = location.pathname.match(/^\/reels\/(?!audio\/)([^/?#]+)/i);
+    return reels ? reels[1] : null;
   }
   function goodHost(elm) {
     if (!elm || elm === document.body || elm === document.documentElement) return false;
@@ -1400,6 +1410,7 @@
 
   function buildOverlay(rec, rankIdx, breakoutX, opts) {
     var ov = el("div", "afw-overlay");
+    ov.__afwRecord = rec;
     ov.appendChild(el("div", "afw-scrim"));
 
     var top = el("div", "afw-top");
@@ -1425,11 +1436,43 @@
 
     if (options.instagram.downloads) {
       var dl = el("div", "afw-dl", svg(ICONS.download));
+      if (opts && opts.alwaysDownload) dl.classList.add("afw-dl-visible");
       dl.title = "Download";
       dl.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); openMenu(rec, dl); });
       ov.appendChild(dl);
+      ensureDownloadPointerRouter();
     }
     return ov;
+  }
+
+  // Instagram sometimes puts a transparent tap target above our overlay. The
+  // native target receives the click despite our z-index, so route download
+  // clicks from document capture by the button's geometry when that happens.
+  var downloadRouterOn = false;
+  function downloadButtonAt(x, y, target) {
+    var buttons = document.querySelectorAll(".afw-dl");
+    for (var i = 0; i < buttons.length; i++) {
+      var button = buttons[i];
+      if (!button.isConnected || (target && button.contains(target))) continue;
+      var rect = button.getBoundingClientRect();
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return button;
+    }
+    return null;
+  }
+  function ensureDownloadPointerRouter() {
+    if (downloadRouterOn) return;
+    downloadRouterOn = true;
+    document.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      var button = downloadButtonAt(e.clientX, e.clientY, e.target);
+      if (!button || !button.parentElement || !button.parentElement.__afwRecord) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      openMenu(button.parentElement.__afwRecord, button);
+    }, true);
+    document.addEventListener("click", function (e) {
+      var button = downloadButtonAt(e.clientX, e.clientY, e.target);
+      if (button) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
   }
 
   // ---- badges -----------------------------------------------------------
@@ -1522,7 +1565,9 @@
       var breakoutX = info.breakoutByPk.get(rec.pk) || "";
       var key = overlayKey(rec, s.by, rankIdx, breakoutX);
       if (old && host.__afwOverlayKey === key) return;
-      var ov = buildOverlay(rec, rankIdx, breakoutX, t.story ? { availableMetrics: true } : null);
+      var ovOptions = t.story ? { availableMetrics: true } : {};
+      if (activeSurface.kind === "home" || activeSurface.kind === "reels-feed") ovOptions.alwaysDownload = true;
+      var ov = buildOverlay(rec, rankIdx, breakoutX, ovOptions);
       host.__afwOverlayKey = key;
       if (old) old.replaceWith(ov);
       else host.appendChild(ov);
@@ -1650,8 +1695,25 @@
     var videos = assets.filter(function (a) { return a.type === "video"; });
     if (images.length > 1) items.push({ kind: "images-all", label: "Download all images", assets: images, folderKind: "image" });
     if (videos.length > 1) items.push({ kind: "videos-all", label: "Download all videos", assets: videos, folderKind: "video" });
-    assets.forEach(function (a) {
-      items.push({ kind: a.type, label: (a.type === "video" ? "Download " : "Download ") + a.label.toLowerCase(), asset: a });
+    videos.forEach(function (asset) {
+      var prefix = videos.length > 1 ? asset.label + ": " : "";
+      var resolution = asset.width && asset.height ? Math.min(asset.width, asset.height) + "p" : "Default";
+      items.push({ kind: "video", label: prefix + (rec.hasAudio === false ? "Video - " : "Video with audio - ") + "Default (" + resolution + ")", asset: asset });
+      var variants = asset.downloadVariants || {};
+      (variants.videoOnly || []).forEach(function (rendition) {
+        var videoOnly = { type: "video", url: rendition.url, label: asset.label, story: asset.story, downloadKind: "video-only", quality: rendition.quality || (rendition.height ? rendition.height + "p" : "") };
+        items.push({ kind: "video-only", label: prefix + "Video only - " + (videoOnly.quality || "source"), asset: videoOnly });
+      });
+      if (variants.audioOnly && variants.audioOnly.url) {
+        var audioOnly = {
+          type: "audio", url: variants.audioOnly.url, label: asset.label, story: asset.story,
+          audioTitle: asset.audioTitle || null, audioArtist: asset.audioArtist || null, audioId: asset.audioId || null
+        };
+        items.push({ kind: "audio", label: prefix + "Audio only (.m4a)", asset: audioOnly });
+      }
+    });
+    images.forEach(function (a) {
+      items.push({ kind: "image", label: "Download " + a.label.toLowerCase(), asset: a });
     });
     if (rec.needsMediaInfo) {
       items.push({ kind: "media-fetch", label: rec.kind === "video" ? "Download video" : "Download remaining media" });
@@ -1676,9 +1738,10 @@
   function closeMenu() { if (menuHost) menuHost.style.display = "none"; }
   function openMenu(rec, anchor) {
     ensureMenu();
+    if (rec && rec.pk && (rec.assets || []).some(function (asset) { return asset.type === "video"; })) requestInfo(rec.pk);
     var items = menuItems(rec);
     var rows = items.map(function (it, i) {
-      var icon = it.kind.indexOf("video") === 0 ? ICONS.download : it.kind.indexOf("image") === 0 ? ICONS.download : ICONS.comment;
+      var icon = it.kind === "caption" || it.kind === "caption-fetch" ? ICONS.comment : ICONS.download;
       return "<button class='mi' data-i='" + i + "'>" + svg(icon) + "<span>" + it.label + "</span></button>";
     }).join("");
     menuRoot.innerHTML =
@@ -1694,11 +1757,11 @@
         e.stopPropagation();
         var it = items[+btn.dataset.i];
         if (it.kind === "images-all" || it.kind === "videos-all") { downloadAssets(rec, it.assets); closeMenu(); }
-        else if (it.kind === "image" || it.kind === "video") downloadAsset(rec, it.asset);
+        else if (it.kind === "image" || it.kind === "video" || it.kind === "video-only" || it.kind === "audio") downloadAsset(rec, it.asset);
         else if (it.kind === "media-fetch") { var s = btn.querySelector("span"); s.textContent = "Fetching media…"; addPending(rec.pk, "media", function (fresh) { downloadAssets(fresh, fresh.assets || []); }); }
         else if (it.kind === "caption") { copyCaption(rec.caption); btn.querySelector("span").textContent = "Copied"; btn.classList.add("ok"); }
         else if (it.kind === "caption-fetch") { var s2 = btn.querySelector("span"); s2.textContent = "Fetching caption…"; addPending(rec.pk, "caption", function (t) { copyCaption(t); }); }
-        if (it.kind === "image" || it.kind === "video") closeMenu();
+        if (it.kind === "image" || it.kind === "video" || it.kind === "video-only" || it.kind === "audio") closeMenu();
       });
     });
     // position under the anchor, kept in the viewport
@@ -1713,6 +1776,62 @@
     if (top + mh > window.innerHeight - 8) top = r.top - mh - 6;
     if (top < 8) top = Math.max(8, window.innerHeight - Math.min(mh, window.innerHeight - 16) - 8);
     menuHost.style.top = top + "px";
+  }
+
+  // Audio pages expose the sound in a native <audio> element. Download that
+  // direct source instead of treating the page as a generic Reels feed.
+  var audioPageButton = null;
+  function nativeAudioSource() {
+    var node = document.querySelector("audio");
+    return node && (node.currentSrc || node.src || node.getAttribute("src"));
+  }
+  function audioPageTitle() {
+    // Instagram puts the useful track/creator label in og:title. The visible
+    // heading is just "Audio", so it would make every downloaded file generic.
+    var meta = document.querySelector("meta[property='og:title']");
+    var title = meta && meta.getAttribute("content");
+    if (title) {
+      var original = title.match(/^(.+?)\s*\|\s*Original audio on Instagram$/i);
+      if (original) return original[1].trim() + " - Original audio";
+      // Music pages put the artist first in og:title, while the visible card
+      // correctly leads with the track. Store files in that human order.
+      var music = title.match(/^(.+?)\s*\|\s*(.+?)\s+on Instagram$/i);
+      if (music) return music[2].trim() + " - " + music[1].trim();
+      title = title.replace(/\s*\|\s*(?:on )?Instagram$/i, "").trim();
+      if (title) return title;
+    }
+    var creator = [].slice.call(document.querySelectorAll("a[href^='/']")).filter(function (node) {
+      return /^\/[^/]+\/$/.test(node.getAttribute("href") || "") && (node.textContent || "").trim() && !/^instagram$/i.test((node.textContent || "").trim());
+    })[0];
+    return creator ? (creator.textContent || "").trim() + " - Original audio" : "audio";
+  }
+  function clearAudioPageDownload() {
+    if (audioPageButton && audioPageButton.parentNode) audioPageButton.parentNode.removeChild(audioPageButton);
+    audioPageButton = null;
+  }
+  function renderAudioPageDownload() {
+    if (activeSurface.kind !== "audio" || !options.instagram.downloads) { clearAudioPageDownload(); return; }
+    var controls = [].slice.call(document.querySelectorAll("button,[role='button']"));
+    var save = controls.filter(function (node) { return /^save audio$/i.test((node.textContent || "").trim()); })[0];
+    if (!save || !save.parentElement) return;
+    if (audioPageButton && audioPageButton.isConnected) return;
+    clearAudioPageDownload();
+    var button = el("button", "afw-audio-dl", svg(ICONS.download) + "<span>Download audio</span>");
+    button.type = "button";
+    button.addEventListener("click", function (e) {
+      e.preventDefault(); e.stopPropagation();
+      var url = nativeAudioSource();
+      if (!url) { button.disabled = true; button.querySelector("span").textContent = "Audio unavailable"; return; }
+      button.disabled = true;
+      button.querySelector("span").textContent = "Downloading…";
+      var filename = downloadExport.audioPageFileName(activeSurface.audioId, audioPageTitle());
+      chrome.runtime.sendMessage({ type: "afw:download", url: url, filename: filename, saveAs: false, conflictAction: "uniquify", dedupe: true }, function () {
+        button.disabled = false;
+        button.querySelector("span").textContent = "Download audio";
+      });
+    });
+    save.parentElement.insertBefore(button, save.nextSibling);
+    audioPageButton = button;
   }
 
   // ---- toolbar (shadow DOM) --------------------------------------------
@@ -2854,7 +2973,10 @@
       // one tile playing at a time; never touch IG's own videos
       liveBars.forEach(function (b) {
         var other = b.__afwVideo;
-        if (other && other !== video && other.__afwTile && !other.paused) other.pause();
+        if (other && other !== video && other.__afwTile) {
+          if (!other.paused) other.pause();
+          other.muted = true;
+        }
       });
     });
     host.appendChild(video);
@@ -2881,6 +3003,7 @@
       if (skipTarget && bar.contains(skipTarget)) return null; // direct path handles it
       var h = bar.__afwHit;
       if (pointIn(h.playBtn.getBoundingClientRect(), x, y)) return { h: h, part: "play" };
+      if (h.muteBtn && pointIn(h.muteBtn.getBoundingClientRect(), x, y)) return { h: h, part: "mute" };
       if (pointIn(h.track.getBoundingClientRect(), x, y)) return { h: h, part: "track" };
     }
     return null;
@@ -2893,6 +3016,7 @@
       var hit = barHitAt(e.clientX, e.clientY, e.target);
       if (!hit) return;
       if (hit.part === "play") { hit.h.toggle(e); }
+      else if (hit.part === "mute") { hit.h.toggleMute(e); }
       else hit.h.onDown(e);
     }, true);
     document.addEventListener("pointermove", function (e) {
@@ -2922,6 +3046,7 @@
     container.classList.add("afw-has-vc");
     var bar = el("div", "afw-vc");
     var playBtn = el("button", "afw-vc-play");
+    var muteBtn = video.__afwTile ? el("button", "afw-vc-mute") : null;
     var track = el("div", "afw-vc-track");
     var rail = el("div", "afw-vc-rail");
     var fill = el("div", "afw-vc-fill");
@@ -2929,7 +3054,7 @@
     rail.appendChild(fill); rail.appendChild(knob);
     track.appendChild(rail);
     var time = el("span", "afw-vc-time");
-    bar.appendChild(playBtn); bar.appendChild(track); bar.appendChild(time);
+    bar.appendChild(playBtn); if (muteBtn) bar.appendChild(muteBtn); bar.appendChild(track); bar.appendChild(time);
     bar.__afwVideo = video;
     video.__afwVCBar = bar;
     container.appendChild(bar);
@@ -2946,6 +3071,14 @@
         ? "<svg viewBox='0 0 24 24'><polygon points='6 4 20 12 6 20 6 4'/></svg>"
         : "<svg viewBox='0 0 24 24'><rect x='6' y='4' width='4' height='16' rx='1'/><rect x='14' y='4' width='4' height='16' rx='1'/></svg>";
     }
+    function soundIcon() {
+      if (!muteBtn) return;
+      var muted = video.muted || video.volume === 0;
+      muteBtn.dataset.state = muted ? "muted" : "audible";
+      muteBtn.title = muted ? "Unmute" : "Mute";
+      muteBtn.setAttribute("aria-label", muted ? "Unmute video" : "Mute video");
+      muteBtn.innerHTML = svg(muted ? ICONS.mute : ICONS.volume);
+    }
     function upd() {
       var d = video.duration || 0, c = video.currentTime || 0;
       var pct = d ? (c / d) * 100 : 0;
@@ -2954,6 +3087,7 @@
       var label = tfmt(c) + " <span class='afw-tot'>/ " + tfmt(d) + "</span>";
       if (time.__afwLabel !== label) { time.__afwLabel = label; time.innerHTML = label; }
       icon();
+      soundIcon();
     }
     function toggle(e) {
       stop(e);
@@ -2978,6 +3112,11 @@
       } else {
         video.pause();
       }
+    }
+    function toggleMute(e) {
+      stop(e);
+      video.muted = !video.muted;
+      soundIcon();
     }
     // Map a client X onto the video timeline using the visible rail's width, so
     // a click or drag anywhere in the tall track band seeks to that point.
@@ -3009,6 +3148,7 @@
       if (track.releasePointerCapture) { try { track.releasePointerCapture(e.pointerId); } catch (err) {} }
     }
     playBtn.addEventListener("click", toggle);
+    if (muteBtn) muteBtn.addEventListener("click", toggleMute);
     track.addEventListener("pointerdown", onDown);
     track.addEventListener("pointermove", onMove);
     track.addEventListener("pointerup", onUp);
@@ -3019,7 +3159,7 @@
     // fire there. The document-level capture router (ensureVcPointerRouter)
     // dispatches by geometry instead; expose the handlers it needs.
     bar.__afwHit = {
-      playBtn: playBtn, track: track, toggle: toggle,
+      playBtn: playBtn, muteBtn: muteBtn, track: track, toggle: toggle, toggleMute: toggleMute,
       onDown: onDown, onMove: onMove, onUp: onUp,
       isDragging: function () { return dragging; }
     };
@@ -3030,8 +3170,10 @@
     video.addEventListener("loadedmetadata", upd);
     video.addEventListener("durationchange", upd);
     video.addEventListener("seeked", upd);
+    if (muteBtn) video.addEventListener("volumechange", soundIcon);
     video.__afwVCCleanup = function () {
       playBtn.removeEventListener("click", toggle);
+      if (muteBtn) muteBtn.removeEventListener("click", toggleMute);
       track.removeEventListener("pointerdown", onDown);
       track.removeEventListener("pointermove", onMove);
       track.removeEventListener("pointerup", onUp);
@@ -3043,6 +3185,7 @@
       video.removeEventListener("loadedmetadata", upd);
       video.removeEventListener("durationchange", upd);
       video.removeEventListener("seeked", upd);
+      if (muteBtn) video.removeEventListener("volumechange", soundIcon);
       container.classList.remove("afw-has-vc");
       if (bar.parentNode) bar.parentNode.removeChild(bar);
       var idx = liveBars.indexOf(bar);
@@ -3061,8 +3204,9 @@
   // mutation path is most of the perf win.
   function renderNative() {
     syncSurface();
-    if (!igOn()) { destroySortedView(false); clearBadges(); clearVideoControls(); clearProfilePanel(); showToolbar(false); return; }
+    if (!igOn()) { destroySortedView(false); clearBadges(); clearVideoControls(); clearProfilePanel(); clearAudioPageDownload(); showToolbar(false); return; }
     renderProfilePanel();
+    renderAudioPageDownload();
     var tl = tileList();
     if (options.instagram.badges) {
       pruneBadges(tl.tiles);

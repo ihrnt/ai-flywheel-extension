@@ -8,14 +8,20 @@
   }
 
   function mediaLeafName(asset) {
-    var ext = asset.type === "video" ? "mp4" : "jpg";
+    var ext = asset.type === "video" ? "mp4" : asset.type === "audio" ? "m4a" : "jpg";
     if (asset.story) {
       if (asset.type === "video") return "story." + ext;
       if (/cover/i.test(asset.label || "")) return "cover." + ext;
       return "story." + ext;
     }
     var match = String(asset.label || "").match(/(\d+)/);
-    if (match) return "slide " + (+match[1]) + "." + ext;
+    var prefix = match ? "slide " + (+match[1]) : "";
+    if (asset.downloadKind === "video-only") return (prefix ? prefix + " " : "reel ") + (asset.quality ? asset.quality + " " : "") + "video-only.mp4";
+    if (asset.type === "audio") {
+      var audioName = [asset.audioTitle, asset.audioArtist].filter(Boolean).join(" - ");
+      return (prefix ? prefix + " " : "") + safeFilePart(audioName, "audio") + ".m4a";
+    }
+    if (match) return prefix + "." + ext;
     if (asset.type === "video") return "reel." + ext;
     if (/cover/i.test(asset.label || "")) return "cover." + ext;
     return "image." + ext;
@@ -24,6 +30,10 @@
   function mediaFileName(handle, record, asset) {
     return "aiflywheel-downloads/" + safeFilePart(handle, "instagram") + "/" +
       safeFilePart(record && (record.isStory ? record.pk : (record.code || record.pk)), "post") + "/" + mediaLeafName(asset || {});
+  }
+
+  function audioPageFileName(audioId, title) {
+    return "aiflywheel-downloads/audio/" + safeFilePart(audioId, "audio") + "/" + safeFilePart(title, "audio") + ".m4a";
   }
 
   function exportTimestamp(d) {
@@ -88,7 +98,7 @@
     return rows.map(function (row) { return row.map(csvCell).join(","); }).join("\n");
   }
 
-  var api = { safeFilePart: safeFilePart, mediaLeafName: mediaLeafName, mediaFileName: mediaFileName, exportTimestamp: exportTimestamp, csvFileName: csvFileName, CSV_HEADER: CSV_HEADER, csvRow: csvRow, csvText: csvText };
+  var api = { safeFilePart: safeFilePart, mediaLeafName: mediaLeafName, mediaFileName: mediaFileName, audioPageFileName: audioPageFileName, exportTimestamp: exportTimestamp, csvFileName: csvFileName, CSV_HEADER: CSV_HEADER, csvRow: csvRow, csvText: csvText };
   root.AFWDownloadExport = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
