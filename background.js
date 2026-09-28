@@ -103,6 +103,7 @@ async function licenseRequest(path, body) {
     return {
       ...result,
       ok: false,
+      retryable: response.status === 429 || response.status >= 500,
       error: result.error === "no_subscription"
         ? "Lifetime access does not need billing management."
         : result.error || result.message || "The license request failed."
@@ -184,6 +185,12 @@ async function resumeCachedLicense() {
   }
 }
 
+async function retryLicenseCheck(current) {
+  const retry = { ...current, checkAfter: new Date(Date.now() + LICENSE_RETRY_MS).toISOString() };
+  await chrome.storage.local.set({ license: retry });
+  return retry;
+}
+
 async function currentLicense() {
   const stored = await chrome.storage.local.get(["license", "licenseKey"]);
   const resumed = await resumeCachedLicense();
@@ -202,13 +209,14 @@ async function currentLicense() {
       token: current.token,
       installationId
     });
-    if (!result.ok) return saveLicense(result.license || DEFAULT_LICENSE);
+    if (!result.ok) {
+      if (result.retryable) return retryLicenseCheck(current);
+      return saveLicense(result.license || DEFAULT_LICENSE);
+    }
     return saveLicense(result.license);
   } catch {
     // Keep the last valid entitlement during a short outage, then retry on a later check.
-    const retry = { ...current, checkAfter: new Date(Date.now() + LICENSE_RETRY_MS).toISOString() };
-    await chrome.storage.local.set({ license: retry });
-    return retry;
+    return retryLicenseCheck(current);
   }
 }
 

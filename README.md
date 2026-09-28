@@ -16,12 +16,20 @@ AI Flywheel turns Instagram's endless, unordered feeds into a ranked view you co
 
 ## Install
 
-While the Chrome Web Store listing is in review, load the extension unpacked:
+To install from GitHub, load the extension unpacked:
 
 1. Download this repository (Code, then Download ZIP) or clone it, and unzip it.
 2. Open `chrome://extensions` in Chrome.
 3. Turn on Developer mode with the toggle in the top right.
 4. Click Load unpacked and select the extension folder.
+
+For updates from GitHub, download the latest ZIP, replace the files in the
+same extension folder, then click Reload on its card in `chrome://extensions`.
+The public extension now uses a permanent ID, `piocfekfhclaibkjfngnaonhpbekimlg`,
+so later updates keep its saved settings and license. An older unpacked copy
+without that ID needs a one-time license activation after updating. If the
+license reports its device limit, use the popup's device move option to release
+the old installation. GitHub ZIP installs do not update automatically.
 
 Chrome only, English only, for this release.
 

@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2myvXAE1kMm46fWI5qlS6XRBYyrB9XRI+Sr+I9tTcUtvq2O6WHxomsVdIt6+ap39T1sea9kMthsTQDJaWQLrvH4TDpoOAhxPPKOS5lrXaI0ilwDqFAXtckW/8gUeyFXdkJ10a72CfDQ0ONaTu3xDnKoXL4dHvAXiEnXaX/cGUVuBc1VsPaPno+JLW7DJnrDFiAt9FEyIDhBm/uU9KXLupAMi5RhIgVgnXwx2jVTRiX8tNY340LKpu/Zc5krKwVGRtx+9NxHVs7VjSMVlf01eQthWfCS/zVPLX8/jhqGUYQGVCJMADNuqW5RFzAGMvmxH+NdYdkuAS57xYCRc/US7KwIDAQAB",
   "name": "AI Flywheel Extension",
   "description": "Sort Instagram profiles, Reels, and Explore by real engagement. See the views, likes, and comments the app hides.",
-  "version": "1.2.9",
+  "version": "1.2.10",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
